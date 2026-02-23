@@ -3,6 +3,7 @@ FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
+RUN npm audit --omit=dev
 COPY tsconfig.json ./
 COPY src/ src/
 RUN npm run build

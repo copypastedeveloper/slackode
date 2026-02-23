@@ -3,7 +3,7 @@ import {
   type OpencodeClient,
   type Event,
 } from "@opencode-ai/sdk";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import type { SlackContext } from "./utils/slack-context.js";
@@ -313,7 +313,7 @@ const CONTEXT_FILES = [
  * Get the current HEAD SHA of the repo.
  */
 function getHeadSha(): string {
-  return execSync("git rev-parse HEAD", { cwd: REPO_DIR, encoding: "utf-8" }).trim();
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_DIR, encoding: "utf-8" }).trim();
 }
 
 /**
@@ -348,13 +348,13 @@ function contextFilesExist(): boolean {
  * Get the git log and diffstat between two SHAs.
  */
 function getChangesSince(fromSha: string): { log: string; diffstat: string } {
-  const log = execSync(`git log --oneline ${fromSha}..HEAD`, {
+  const log = execFileSync("git", ["log", "--oneline", `${fromSha}..HEAD`], {
     cwd: REPO_DIR,
     encoding: "utf-8",
     maxBuffer: 1024 * 1024,
   }).trim();
 
-  const diffstat = execSync(`git diff --stat ${fromSha}..HEAD`, {
+  const diffstat = execFileSync("git", ["diff", "--stat", `${fromSha}..HEAD`], {
     cwd: REPO_DIR,
     encoding: "utf-8",
     maxBuffer: 1024 * 1024,
