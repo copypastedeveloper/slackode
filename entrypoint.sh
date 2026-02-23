@@ -29,16 +29,9 @@ clean_repo_agents() {
 if [ -n "$COPILOT_TOKEN" ]; then
   AUTH_DIR="$HOME/.local/share/opencode"
   mkdir -p "$AUTH_DIR"
-  cat > "$AUTH_DIR/auth.json" <<EOF
-{
-  "github-copilot": {
-    "type": "oauth",
-    "access": "$COPILOT_TOKEN",
-    "refresh": "$COPILOT_TOKEN",
-    "expires": 0
-  }
-}
-EOF
+  # Use printf to safely embed the token without shell interpretation
+  printf '{"github-copilot":{"type":"oauth","access":"%s","refresh":"%s","expires":0}}\n' \
+    "$COPILOT_TOKEN" "$COPILOT_TOKEN" > "$AUTH_DIR/auth.json"
   echo "Copilot auth.json written to $AUTH_DIR/auth.json"
 else
   echo "WARNING: COPILOT_TOKEN is not set — OpenCode Copilot auth will fail."
@@ -50,10 +43,23 @@ if [ -z "$TARGET_REPO" ]; then
   exit 1
 fi
 
+# Validate TARGET_REPO format (owner/repo, alphanumeric with hyphens/underscores/dots)
+if ! echo "$TARGET_REPO" | grep -qE '^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$'; then
+  echo "ERROR: TARGET_REPO must be in 'owner/repo' format (got: $TARGET_REPO)"
+  exit 1
+fi
+
+REPO_URL="https://github.com/${TARGET_REPO}.git"
+
 if [ -n "$GITHUB_TOKEN" ]; then
-  REPO_URL="https://${GITHUB_TOKEN}@github.com/${TARGET_REPO}.git"
+  # Use GIT_ASKPASS to supply credentials without embedding them in the URL
+  # or persisting them in .git/config
+  GIT_ASKPASS_SCRIPT="$(mktemp)"
+  printf '#!/bin/sh\necho "%s"\n' "$GITHUB_TOKEN" > "$GIT_ASKPASS_SCRIPT"
+  chmod +x "$GIT_ASKPASS_SCRIPT"
+  export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
+  export GIT_TERMINAL_PROMPT=0
 else
-  REPO_URL="https://github.com/${TARGET_REPO}.git"
   echo "WARNING: GITHUB_TOKEN is not set — clone may fail for private repos."
 fi
 
@@ -61,6 +67,8 @@ if [ ! -d /app/repo/.git ]; then
   echo "Cloning ${TARGET_REPO}..."
   git clone "$REPO_URL" /app/repo
 else
+  # Ensure the remote URL doesn't contain embedded credentials from a prior run
+  git -C /app/repo remote set-url origin "$REPO_URL"
   echo "Updating ${TARGET_REPO}..."
   git -C /app/repo pull || echo "Pull failed, continuing with existing checkout."
 fi
@@ -78,7 +86,7 @@ cp /app/.opencode/rules/*.md /app/repo/.opencode/rules/
 # ── Start OpenCode server ──
 echo "Starting OpenCode server..."
 cd /app/repo
-opencode serve --port 4096 --hostname 0.0.0.0 &
+opencode serve --port 4096 --hostname 127.0.0.1 &
 OPENCODE_PID=$!
 
 # Wait for server to be healthy (timeout after 60s)

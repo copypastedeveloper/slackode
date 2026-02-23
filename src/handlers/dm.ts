@@ -5,6 +5,7 @@ import type { AskResult } from "../opencode.js";
 import { markdownToSlack, splitMessage } from "../utils/formatting.js";
 import { getSlackContext } from "../utils/slack-context.js";
 import { createProgressUpdater } from "../utils/progress.js";
+import { checkRateLimit, formatRetryAfter } from "../utils/rate-limit.js";
 
 type MessageArgs = SlackEventMiddlewareArgs<"message"> & AllMiddlewareArgs;
 
@@ -20,6 +21,16 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
 
   const userId = "user" in event ? event.user : undefined;
   if (!userId) return;
+
+  // Rate limit check
+  const rateCheck = checkRateLimit(userId);
+  if (!rateCheck.allowed) {
+    await client.chat.postMessage({
+      channel: event.channel,
+      text: `_You've reached the rate limit. Please try again in ${formatRetryAfter(rateCheck.retryAfterMs)}._`,
+    });
+    return;
+  }
 
   // Use thread_ts if this is a threaded reply, otherwise use the message's
   // own ts — which will become the thread_ts for all future replies in the

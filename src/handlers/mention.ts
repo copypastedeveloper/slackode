@@ -5,6 +5,7 @@ import type { AskResult } from "../opencode.js";
 import { markdownToSlack, splitMessage } from "../utils/formatting.js";
 import { getSlackContext } from "../utils/slack-context.js";
 import { createProgressUpdater } from "../utils/progress.js";
+import { checkRateLimit, formatRetryAfter } from "../utils/rate-limit.js";
 
 type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
 
@@ -22,6 +23,18 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
     return;
   }
 
+  // Rate limit check
+  const userId = event.user ?? "unknown";
+  const rateCheck = checkRateLimit(userId);
+  if (!rateCheck.allowed) {
+    await client.chat.postMessage({
+      channel: event.channel,
+      thread_ts: event.thread_ts ?? event.ts,
+      text: `_You've reached the rate limit. Please try again in ${formatRetryAfter(rateCheck.retryAfterMs)}._`,
+    });
+    return;
+  }
+
   const threadTs = event.thread_ts ?? event.ts;
 
   // Post a placeholder reply in the thread
@@ -35,7 +48,7 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
 
   try {
     const threadKey = threadTs;
-    const slackCtx = await getSlackContext(client, event.user ?? "unknown", event.channel, "channel");
+    const slackCtx = await getSlackContext(client, userId, event.channel, "channel");
     const { sessionId, isNew } = await getOrCreateSession(threadKey, slackCtx);
 
     // Set up throttled progress updates
