@@ -153,6 +153,27 @@ Where are the serializers for that?
 
 The bot keeps conversation context within a thread — follow-ups don't need to repeat background information.
 
+### Custom instructions per channel
+
+You can set custom instructions that are included with every question sent from a specific channel (or DM). Use them to steer the bot toward specific areas of the codebase or adjust the level of detail.
+
+**Set instructions:**
+```
+@Slackode /config set Focus on the Django REST framework views and serializers. Assume the reader is familiar with DRF.
+```
+
+**View current instructions:**
+```
+@Slackode /config show
+```
+
+**Clear instructions:**
+```
+@Slackode /config clear
+```
+
+Custom instructions work in both channels and DMs (max 1000 characters). The bot also reads the channel topic and purpose automatically, so for lightweight hints you can just put them there.
+
 ## Architecture
 
 ```
@@ -213,13 +234,12 @@ For the full list of providers and models, see the [OpenCode providers docs](htt
 
 ## Volumes
 
-Docker Compose mounts three named volumes for persistence across restarts:
+Docker Compose mounts two named volumes for persistence across restarts:
 
 | Volume | Container path | Purpose |
 |--------|---------------|---------|
 | `repo-cache` | `/app/repo` | Cloned repo (avoids re-clone on restart) |
-| `opencode-data` | `/home/appuser/.local/share/opencode` | OpenCode's SQLite DB (sessions, messages) |
-| `bot-data` | `/app/data` | Bot's sessions.db (Slack thread mapping) |
+| `opencode-data` | `/home/appuser/.local/share/opencode` | OpenCode state + bot sessions DB |
 
 ## Development
 

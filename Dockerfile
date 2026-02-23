@@ -24,7 +24,7 @@ COPY .opencode/ .opencode/
 RUN chmod +x entrypoint.sh
 
 # Create directories the app needs and give appuser ownership
-RUN mkdir -p /app/repo /app/data /home/appuser/.local/share/opencode \
+RUN mkdir -p /app/repo /home/appuser/.local/share/opencode \
     && chown -R appuser:appuser /app /home/appuser
 
 USER appuser

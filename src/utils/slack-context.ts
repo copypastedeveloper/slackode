@@ -11,6 +11,7 @@ export interface SlackContext {
   channelTopic: string;
   channelPurpose: string;
   channelType: "dm" | "channel";
+  customPrompt?: string;
 }
 
 export async function getSlackContext(

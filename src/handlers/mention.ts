@@ -1,10 +1,12 @@
 import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from "@slack/bolt";
-import { getOrCreateSession } from "../sessions.js";
+import { getOrCreateSession, getChannelConfig, setChannelConfig, clearChannelConfig } from "../sessions.js";
 import { askQuestion } from "../opencode.js";
 import type { AskResult } from "../opencode.js";
 import { markdownToSlack, splitMessage } from "../utils/formatting.js";
 import { getSlackContext } from "../utils/slack-context.js";
 import { createProgressUpdater } from "../utils/progress.js";
+
+const MAX_CUSTOM_PROMPT_LENGTH = 1000;
 
 type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
 
@@ -25,6 +27,52 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
   const userId = event.user ?? "unknown";
   const threadTs = event.thread_ts ?? event.ts;
 
+  // ── /config commands ──
+  if (question.startsWith("/config")) {
+    const args = question.slice("/config".length).trim();
+
+    if (args.startsWith("set ")) {
+      const prompt = args.slice("set ".length).trim();
+      if (!prompt) {
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
+          text: "Usage: `/config set <instructions>` — provide the custom instructions after `set`." });
+        return;
+      }
+      if (prompt.length > MAX_CUSTOM_PROMPT_LENGTH) {
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
+          text: `Custom instructions must be ${MAX_CUSTOM_PROMPT_LENGTH} characters or fewer (yours: ${prompt.length}).` });
+        return;
+      }
+      setChannelConfig(event.channel, prompt, userId);
+      await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
+        text: `Custom instructions set for this channel:\n> ${prompt}` });
+      return;
+    }
+
+    if (args === "show") {
+      const config = getChannelConfig(event.channel);
+      if (config) {
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
+          text: `Custom instructions for this channel (set by <@${config.configuredBy}>):\n> ${config.customPrompt}` });
+      } else {
+        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
+          text: "No custom instructions set for this channel." });
+      }
+      return;
+    }
+
+    if (args === "clear") {
+      clearChannelConfig(event.channel);
+      await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
+        text: "Custom instructions cleared for this channel." });
+      return;
+    }
+
+    await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
+      text: "Usage: `/config set <instructions>`, `/config show`, or `/config clear`." });
+    return;
+  }
+
   // Post a placeholder reply in the thread
   const placeholder = await client.chat.postMessage({
     channel: event.channel,
@@ -37,6 +85,13 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
   try {
     const threadKey = threadTs;
     const slackCtx = await getSlackContext(client, userId, event.channel, "channel");
+
+    // Attach per-channel custom prompt if configured
+    const channelConfig = getChannelConfig(event.channel);
+    if (channelConfig) {
+      slackCtx.customPrompt = channelConfig.customPrompt;
+    }
+
     const { sessionId, isNew } = await getOrCreateSession(threadKey, slackCtx);
 
     // Set up throttled progress updates
