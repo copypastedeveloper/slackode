@@ -212,8 +212,7 @@ src/
 └── utils/
     ├── formatting.ts     # Markdown -> Slack mrkdwn conversion
     ├── slack-context.ts  # Fetches user/channel info from Slack API
-    ├── progress.ts       # Throttled Slack message updater
-    └── rate-limit.ts     # Per-user sliding window rate limiter
+    └── progress.ts       # Throttled Slack message updater
 ```
 
 ## Security
@@ -232,9 +231,6 @@ Slackode is designed to be safe to deploy on a shared network. The following mea
 **Input validation**
 - `TARGET_REPO` is validated against a strict `owner/repo` regex on startup
 - User questions are wrapped in `<user_question>` delimiter tags with explicit anti-injection instructions so the LLM treats them as opaque questions, not directives
-
-**Rate limiting**
-- Each Slack user is limited to 20 requests per hour (sliding window). Rate-limited users receive a friendly message with the retry time. This is in-memory and resets on container restart.
 
 ## License
 
