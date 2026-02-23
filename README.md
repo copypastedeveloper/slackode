@@ -1,4 +1,6 @@
-# Slackode
+<p align="center">
+  <img src="assets/logo.svg" alt="Slackode" width="400">
+</p>
 
 A Slack bot that answers questions about your codebase. Point it at any GitHub repo and ask questions via @mentions or DMs — it uses [OpenCode](https://opencode.ai) to explore the code and respond with accurate, cited answers.
 

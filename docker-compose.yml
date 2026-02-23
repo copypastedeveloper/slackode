@@ -2,8 +2,6 @@ services:
   bot:
     build: .
     env_file: .env
-    ports:
-      - "4096:4096"
     volumes:
       - repo-cache:/app/repo
       - opencode-data:/root/.local/share/opencode
