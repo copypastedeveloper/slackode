@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# ── Provider configuration ──
+PROVIDER="${PROVIDER:-github-copilot}"
+MODEL="${MODEL:-claude-sonnet-4.6}"
+
 # ── Neutralize the target repo's own agent/skill/plugin files ──
 # Some repos ship their own .opencode/agents/, .opencode/plugin/,
 # and .claude/skills/ directories. OpenCode auto-discovers and loads these,
@@ -22,20 +26,39 @@ clean_repo_agents() {
   echo "Repo agent/skill/plugin files cleaned."
 }
 
-# ── Pre-seed OpenCode auth for GitHub Copilot ──
-# OpenCode reads ~/.local/share/opencode/auth.json on startup.
-# We write the COPILOT_TOKEN PAT as an OAuth access token so it
-# skips the interactive device-code flow.
-if [ -n "$COPILOT_TOKEN" ]; then
-  AUTH_DIR="$HOME/.local/share/opencode"
-  mkdir -p "$AUTH_DIR"
-  # Use printf to safely embed the token without shell interpretation
-  printf '{"github-copilot":{"type":"oauth","access":"%s","refresh":"%s","expires":0}}\n' \
-    "$COPILOT_TOKEN" "$COPILOT_TOKEN" > "$AUTH_DIR/auth.json"
-  echo "Copilot auth.json written to $AUTH_DIR/auth.json"
-else
-  echo "WARNING: COPILOT_TOKEN is not set — OpenCode Copilot auth will fail."
+# ── Pre-seed OpenCode auth ──
+# Only github-copilot requires a pre-seeded auth.json (OAuth token).
+# Other providers use standard API key env vars that OpenCode reads directly.
+if [ "$PROVIDER" = "github-copilot" ]; then
+  if [ -n "$COPILOT_TOKEN" ]; then
+    AUTH_DIR="$HOME/.local/share/opencode"
+    mkdir -p "$AUTH_DIR"
+    # Use printf to safely embed the token without shell interpretation
+    printf '{"github-copilot":{"type":"oauth","access":"%s","refresh":"%s","expires":0}}\n' \
+      "$COPILOT_TOKEN" "$COPILOT_TOKEN" > "$AUTH_DIR/auth.json"
+    echo "Copilot auth.json written to $AUTH_DIR/auth.json"
+  else
+    echo "ERROR: COPILOT_TOKEN is required when PROVIDER=github-copilot"
+    echo "Run 'opencode auth login' locally, then copy the gho_ token from ~/.local/share/opencode/auth.json"
+    exit 1
+  fi
 fi
+
+# ── Validate provider-specific requirements ──
+case "$PROVIDER" in
+  github-copilot) ;;  # handled above
+  anthropic)
+    [ -z "$ANTHROPIC_API_KEY" ] && echo "ERROR: ANTHROPIC_API_KEY is required when PROVIDER=anthropic" && exit 1 ;;
+  openai)
+    [ -z "$OPENAI_API_KEY" ] && echo "ERROR: OPENAI_API_KEY is required when PROVIDER=openai" && exit 1 ;;
+  amazon-bedrock)
+    [ -z "$AWS_REGION" ] && echo "WARNING: AWS_REGION is not set — Bedrock may fail." ;;
+  google-vertex-ai)
+    [ -z "$GOOGLE_CLOUD_PROJECT" ] && echo "WARNING: GOOGLE_CLOUD_PROJECT is not set — Vertex AI may fail." ;;
+  *)
+    echo "Using provider: $PROVIDER — ensure its API key env var is set." ;;
+esac
+echo "Provider: $PROVIDER, Model: $MODEL"
 
 # ── Clone or update the repo ──
 if [ -z "$TARGET_REPO" ]; then
@@ -80,6 +103,7 @@ clean_repo_agents /app/repo
 # opencode serve uses the cwd for config, so opencode.json and .opencode/rules/
 # need to be present where the server runs.
 cp /app/opencode.json /app/repo/opencode.json
+sed -i 's|"model": "[^"]*"|"model": "'"${PROVIDER}/${MODEL}"'"|' /app/repo/opencode.json
 mkdir -p /app/repo/.opencode/rules
 cp /app/.opencode/rules/*.md /app/repo/.opencode/rules/
 
@@ -113,6 +137,7 @@ echo "OpenCode server is ready (took ${SECONDS}s)."
       echo "[repo-sync] Cleaning repo agent/skill/plugin files..."
       clean_repo_agents /app/repo
       cp /app/opencode.json /app/repo/opencode.json
+      sed -i 's|"model": "[^"]*"|"model": "'"${PROVIDER}/${MODEL}"'"|' /app/repo/opencode.json
       echo "[repo-sync] Repo updated. Context regeneration will be triggered by the bot."
     else
       echo "[repo-sync] Pull failed, will retry next cycle."

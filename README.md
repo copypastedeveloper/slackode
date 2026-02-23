@@ -20,7 +20,7 @@ The bot is strictly **read-only** — it will never suggest code changes, write 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 - A Slack workspace where you can create apps
 - A GitHub account with access to the target repo
-- A GitHub Copilot subscription (used as the LLM provider)
+- A GitHub Copilot subscription (default LLM provider) or API key for another [supported provider](#providers)
 
 ## Setup
 
@@ -61,9 +61,13 @@ The bot is strictly **read-only** — it will never suggest code changes, write 
 
 10. Go to **Features** > **App Home** and check **Allow users to send Slash commands and messages from the messages tab**
 
-### 2. Get a GitHub Copilot token
+### 2. Configure your LLM provider
 
-Slackode uses GitHub Copilot as its LLM provider. Standard GitHub PATs (`ghp_`, `github_pat_`) do **not** work for Copilot auth — you need an OAuth token from the device flow.
+Slackode defaults to GitHub Copilot but supports [many providers](#providers). To use a different provider, set `PROVIDER` and `MODEL` in your `.env` and skip the Copilot steps below.
+
+**GitHub Copilot (default):**
+
+Standard GitHub PATs (`ghp_`, `github_pat_`) do **not** work for Copilot auth — you need an OAuth token from the device flow.
 
 1. Install and run OpenCode locally:
    ```bash
@@ -96,7 +100,16 @@ SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 TARGET_REPO=your-org/your-repo
 GITHUB_TOKEN=ghp_...
+
+# Default provider (GitHub Copilot)
+PROVIDER=github-copilot
+MODEL=claude-sonnet-4.6
 COPILOT_TOKEN=gho_...
+
+# Or use a different provider:
+# PROVIDER=anthropic
+# MODEL=claude-sonnet-4-5-20250514
+# ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ### 5. Run
@@ -159,8 +172,8 @@ The bot keeps conversation context within a thread — follow-ups don't need to 
 └─────────────────────────────────────────────┘
          │                      │
          v                      v
-    Slack API             GitHub Copilot API
-    (Socket Mode)         (LLM provider)
+    Slack API             LLM Provider API
+    (Socket Mode)         (configurable)
 ```
 
 - **Slack Bot** — Bolt for JavaScript with Socket Mode. Handles @mentions and DMs, manages thread-to-session mapping in SQLite, streams progress updates.
@@ -175,9 +188,28 @@ The bot keeps conversation context within a thread — follow-ups don't need to 
 | `SLACK_APP_TOKEN` | Yes | App-Level Token with `connections:write` (`xapp-...`) |
 | `TARGET_REPO` | Yes | GitHub repo in `owner/name` format |
 | `GITHUB_TOKEN` | For private repos | PAT with repo read access |
-| `COPILOT_TOKEN` | Yes | GitHub Copilot OAuth token (`gho_...`) |
+| `PROVIDER` | No | LLM provider (default: `github-copilot`) |
+| `MODEL` | No | Model ID (default: `claude-sonnet-4.6`) |
+| `COPILOT_TOKEN` | For github-copilot | GitHub Copilot OAuth token (`gho_...`) |
 | `OPENCODE_URL` | No | OpenCode server URL (default: `http://127.0.0.1:4096`) |
 | `SESSIONS_DB_PATH` | No | Path to sessions SQLite DB (default: `./sessions.db`) |
+
+### Providers
+
+Slackode uses [OpenCode](https://opencode.ai) under the hood, which supports many LLM providers. Set `PROVIDER` and `MODEL` in your `.env` along with the provider's API key:
+
+| Provider | `PROVIDER` | Example `MODEL` | Required env var |
+|----------|-----------|-----------------|-----------------|
+| GitHub Copilot | `github-copilot` | `claude-sonnet-4.6` | `COPILOT_TOKEN` |
+| Anthropic | `anthropic` | `claude-sonnet-4-5-20250514` | `ANTHROPIC_API_KEY` |
+| OpenAI | `openai` | `gpt-4.1` | `OPENAI_API_KEY` |
+| Amazon Bedrock | `amazon-bedrock` | `us.anthropic.claude-sonnet-4-5-v2-20250514` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+| OpenRouter | `openrouter` | `anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` |
+| Google Vertex AI | `google-vertex-ai` | `claude-sonnet-4-5` | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS` |
+| Groq | `groq` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
+| DeepSeek | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
+
+For the full list of providers and models, see the [OpenCode providers docs](https://opencode.ai/docs/providers).
 
 ## Volumes
 
@@ -226,7 +258,8 @@ Slackode is designed to be safe to deploy on a shared network. The following mea
 
 **Credential handling**
 - Git credentials are supplied via `GIT_ASKPASS` — they never appear in the repo URL, `ps` output, or `.git/config`
-- Copilot auth is written with `printf` to avoid shell interpretation of special characters
+- Copilot auth (when using `github-copilot` provider) is written with `printf` to avoid shell interpretation of special characters
+- Other providers use standard API key env vars passed directly to the container
 
 **Input validation**
 - `TARGET_REPO` is validated against a strict `owner/repo` regex on startup
