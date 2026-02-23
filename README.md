@@ -186,7 +186,7 @@ Docker Compose mounts three named volumes for persistence across restarts:
 | Volume | Container path | Purpose |
 |--------|---------------|---------|
 | `repo-cache` | `/app/repo` | Cloned repo (avoids re-clone on restart) |
-| `opencode-data` | `/root/.local/share/opencode` | OpenCode's SQLite DB (sessions, messages) |
+| `opencode-data` | `/home/appuser/.local/share/opencode` | OpenCode's SQLite DB (sessions, messages) |
 | `bot-data` | `/app/data` | Bot's sessions.db (Slack thread mapping) |
 
 ## Development
@@ -212,8 +212,29 @@ src/
 └── utils/
     ├── formatting.ts     # Markdown -> Slack mrkdwn conversion
     ├── slack-context.ts  # Fetches user/channel info from Slack API
-    └── progress.ts       # Throttled Slack message updater
+    ├── progress.ts       # Throttled Slack message updater
+    └── rate-limit.ts     # Per-user sliding window rate limiter
 ```
+
+## Security
+
+Slackode is designed to be safe to deploy on a shared network. The following measures are in place:
+
+**Container isolation**
+- Runs as a non-root user (`appuser`) inside the container
+- Filesystem is mounted read-only (`read_only: true`) with a small tmpfs at `/tmp`
+- The OpenCode server binds to `127.0.0.1:4096` — not accessible outside the container
+
+**Credential handling**
+- Git credentials are supplied via `GIT_ASKPASS` — they never appear in the repo URL, `ps` output, or `.git/config`
+- Copilot auth is written with `printf` to avoid shell interpretation of special characters
+
+**Input validation**
+- `TARGET_REPO` is validated against a strict `owner/repo` regex on startup
+- User questions are wrapped in `<user_question>` delimiter tags with explicit anti-injection instructions so the LLM treats them as opaque questions, not directives
+
+**Rate limiting**
+- Each Slack user is limited to 20 requests per hour (sliding window). Rate-limited users receive a friendly message with the retry time. This is in-memory and resets on container restart.
 
 ## License
 
