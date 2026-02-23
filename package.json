@@ -1,0 +1,23 @@
+{
+  "name": "slackode",
+  "version": "1.0.0",
+  "description": "Slack bot that answers codebase questions via OpenCode",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.6.0",
+    "@opencode-ai/sdk": "^1.2.10",
+    "better-sqlite3": "^12.6.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.3.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "github-copilot/claude-sonnet-4.6",
+  "default_agent": "build",
+  "instructions": [".opencode/rules/*.md"],
+  "tools": {
+    "skill": false,
+    "write": false,
+    "edit": false,
+    "patch": false,
+    "todowrite": false,
+    "todoread": false,
+    "webfetch": false,
+    "websearch": false,
+    "question": false
+  },
+  "permission": {
+    "edit": "deny",
+    "bash": {
+      "*": "allow"
+    },
+    "skill": {
+      "*": "deny"
+    },
+    "task": {
+      "*": "deny"
+    }
+  },
+  "agent": {
+    "build": {
+      "description": "Read-only Q&A assistant for the target codebase",
+      "tools": {
+        "bash": true,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "skill": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false
+      },
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "allow"
+        },
+        "skill": {
+          "*": "deny"
+        },
+        "task": {
+          "*": "deny"
+        }
+      }
+    },
+    "context": {
+      "description": "Generates context reference files by analyzing the codebase",
+      "tools": {
+        "bash": true,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "write": true,
+        "skill": false,
+        "edit": false,
+        "patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false
+      },
+      "permission": {
+        "write": {
+          ".opencode/rules/*": "allow"
+        },
+        "edit": "deny",
+        "bash": {
+          "*": "allow"
+        },
+        "skill": {
+          "*": "deny"
+        },
+        "task": {
+          "*": "deny"
+        }
+      }
+    },
+    "plan": {
+      "disable": true
+    },
+    "general": {
+      "disable": true
+    },
+    "explore": {
+      "disable": true
+    }
+  }
+}

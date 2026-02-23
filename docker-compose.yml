@@ -1,0 +1,18 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    ports:
+      - "4096:4096"
+    volumes:
+      - repo-cache:/app/repo
+      - opencode-data:/root/.local/share/opencode
+      - bot-data:/app/data
+    environment:
+      - SESSIONS_DB_PATH=/app/data/sessions.db
+    restart: unless-stopped
+
+volumes:
+  repo-cache:
+  opencode-data:
+  bot-data:
