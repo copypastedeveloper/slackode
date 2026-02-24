@@ -18,6 +18,14 @@ function getDb(): Database.Database {
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS channel_agents (
+        channel_id TEXT PRIMARY KEY,
+        channel_name TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
   }
   return db;
 }
@@ -54,6 +62,42 @@ export async function getOrCreateSession(
   saveSession(threadKey, sessionId);
 
   return { sessionId, isNew: true };
+}
+
+// --- Channel-to-agent mapping ---
+
+export function getChannelAgent(channelId: string): string | undefined {
+  const row = getDb()
+    .prepare("SELECT agent FROM channel_agents WHERE channel_id = ?")
+    .get(channelId) as { agent: string } | undefined;
+  return row?.agent;
+}
+
+export function setChannelAgent(channelId: string, channelName: string, agent: string): void {
+  getDb()
+    .prepare(
+      "INSERT OR REPLACE INTO channel_agents (channel_id, channel_name, agent, updated_at) VALUES (?, ?, ?, unixepoch())"
+    )
+    .run(channelId, channelName, agent);
+}
+
+export function clearChannelAgent(channelId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM channel_agents WHERE channel_id = ?")
+    .run(channelId);
+  return result.changes > 0;
+}
+
+export interface ChannelAgentRow {
+  channel_id: string;
+  channel_name: string;
+  agent: string;
+}
+
+export function listChannelAgents(): ChannelAgentRow[] {
+  return getDb()
+    .prepare("SELECT channel_id, channel_name, agent FROM channel_agents ORDER BY channel_name")
+    .all() as ChannelAgentRow[];
 }
 
 export function closeDb(): void {
