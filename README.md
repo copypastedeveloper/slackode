@@ -10,8 +10,9 @@ A Slack bot that answers questions about your codebase. Point it at any GitHub r
 2. **Generates context files** on startup by analyzing the repo structure, key abstractions, and conventions using an OpenCode agent
 3. **Answers questions** via Slack — @mention in a channel or DM directly. Uses OpenCode's tool-use (grep, read, glob, bash) to find answers in the actual code
 4. **Maintains conversation context** — follow-up questions in the same Slack thread share the same OpenCode session
-5. **Streams progress** — shows intermediate status in Slack as the agent works ("Looking into this..." -> "Using: grep, read..." -> final answer)
-6. **Tailors responses by role** — pulls your Slack profile (title, status) and channel context to adjust technical depth
+5. **Picks up thread context** — if you @mention the bot in an existing thread, it reads the preceding conversation so it can answer in context
+6. **Streams progress** — shows intermediate status in Slack as the agent works ("Looking into this..." -> "Using: grep, read..." -> final answer)
+7. **Tailors responses by role** — pulls your Slack profile (title, status) and channel context to adjust technical depth
 
 The bot is strictly **read-only** — it will never suggest code changes, write diffs, or offer to implement anything. It explains the current state of the codebase.
 
@@ -44,6 +45,7 @@ The bot is strictly **read-only** — it will never suggest code changes, write 
    - `im:history` — read DM history
    - `users:read` — fetch user profile info (name, title, status)
    - `channels:read` — fetch channel info (name, topic, purpose)
+   - `channels:history` — read channel thread history (for thread context)
 
 **Enable events:**
 
@@ -159,17 +161,17 @@ You can set custom instructions that are included with every question sent from 
 
 **Set instructions:**
 ```
-@Slackode /config set Focus on the Django REST framework views and serializers. Assume the reader is familiar with DRF.
+@Slackode config set Focus on the Django REST framework views and serializers. Assume the reader is familiar with DRF.
 ```
 
 **View current instructions:**
 ```
-@Slackode /config show
+@Slackode config show
 ```
 
 **Clear instructions:**
 ```
-@Slackode /config clear
+@Slackode config clear
 ```
 
 Custom instructions work in both channels and DMs (max 1000 characters). The bot also reads the channel topic and purpose automatically, so for lightweight hints you can just put them there.
@@ -273,7 +275,7 @@ Slackode is designed to be safe to deploy on a shared network. The following mea
 
 **Container isolation**
 - Runs as a non-root user (`appuser`) inside the container
-- Filesystem is mounted read-only (`read_only: true`) with a small tmpfs at `/tmp`
+- Filesystem is mounted read-only (`read_only: true`) with explicit tmpfs mounts for `/tmp` and runtime directories
 - The OpenCode server binds to `127.0.0.1:4096` — not accessible outside the container
 
 **Credential handling**

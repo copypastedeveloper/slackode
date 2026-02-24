@@ -17,7 +17,9 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
   if ("bot_id" in event) return;
   if (!("text" in event) || !event.text) return;
 
-  const question = event.text.trim();
+  // Strip any <@BOT_ID> mention (users often @-mention the bot even in DMs)
+  const botUserId = context.botUserId;
+  const question = event.text.replace(new RegExp(`<@${botUserId}>\\s*`, "g"), "").trim();
   if (!question) return;
 
   const userId = "user" in event ? event.user : undefined;
@@ -31,15 +33,15 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
 
   const threadTs = "thread_ts" in event ? event.thread_ts : event.ts;
 
-  // ── /config commands ──
-  if (question.startsWith("/config")) {
-    const args = question.slice("/config".length).trim();
+  // ── config commands ──
+  if (question.startsWith("config ") || question === "config") {
+    const args = question.slice("config".length).trim();
 
     if (args.startsWith("set ")) {
       const prompt = args.slice("set ".length).trim();
       if (!prompt) {
         await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-          text: "Usage: `/config set <instructions>` — provide the custom instructions after `set`." });
+          text: "Usage: `config set <instructions>` — provide the custom instructions after `set`." });
         return;
       }
       if (prompt.length > MAX_CUSTOM_PROMPT_LENGTH) {
@@ -73,7 +75,7 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
     }
 
     await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-      text: "Usage: `/config set <instructions>`, `/config show`, or `/config clear`." });
+      text: "Usage: `config set <instructions>`, `config show`, or `config clear`." });
     return;
   }
 

@@ -123,6 +123,14 @@ export function buildContextPrefix(ctx: SlackContext, isNew: boolean): string {
     lines.push(`Custom instructions for this channel: ${ctx.customPrompt}`);
   }
 
+  if (ctx.threadContext) {
+    lines.push("");
+    lines.push("The user tagged you in an existing Slack thread. Here is the preceding conversation for context:");
+    lines.push("<thread_context>");
+    lines.push(ctx.threadContext);
+    lines.push("</thread_context>");
+  }
+
   lines.push(
     "</context>",
     ""
