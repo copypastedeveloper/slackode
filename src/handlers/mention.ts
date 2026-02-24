@@ -41,6 +41,14 @@ async function handleConfigCommand(
   const setMatch = subcommand.match(/^set\s+agent\s+(\S+)$/i);
   if (setMatch) {
     const agent = setMatch[1];
+    // Validate that the agent exists before saving it, so we don't persist
+    // invalid agent names that OpenCode cannot resolve.
+    try {
+      // Use `any` here to avoid depending on the exact `resolveAgent` signature.
+      await (resolveAgent as any)(agent);
+    } catch (err) {
+      return `Agent \`${agent}\` is not recognized. Please make sure it is defined in your OpenCode configuration (e.g., opencode.json).`;
+    }
     setChannelAgent(channelId, channelName, agent);
     return `Agent for #${channelName} set to \`${agent}\`. Messages in this channel will now use the \`${agent}\` agent profile.`;
   }
