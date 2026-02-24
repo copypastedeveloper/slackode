@@ -26,6 +26,14 @@ function getDb(): Database.Database {
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS channel_tools (
+        channel_id TEXT PRIMARY KEY,
+        channel_name TEXT NOT NULL,
+        tools TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
   }
   return db;
 }
@@ -98,6 +106,61 @@ export function listChannelAgents(): ChannelAgentRow[] {
   return getDb()
     .prepare("SELECT channel_id, channel_name, agent FROM channel_agents ORDER BY channel_name")
     .all() as ChannelAgentRow[];
+}
+
+// --- Channel-to-tools mapping ---
+
+/** Tools that can be enabled per-channel via `config set tools`. */
+export const KNOWN_TOOLS: Record<string, string> = {
+  linear: "Linear issue tracking — search issues, projects, and teams",
+  sentry: "Sentry error monitoring — search errors, exceptions, and performance data",
+};
+
+export function getChannelTools(channelId: string): string[] | undefined {
+  const row = getDb()
+    .prepare("SELECT tools FROM channel_tools WHERE channel_id = ?")
+    .get(channelId) as { tools: string } | undefined;
+  if (!row) return undefined;
+  return row.tools.split(",").filter(Boolean);
+}
+
+export function setChannelTools(channelId: string, channelName: string, tools: string[]): void {
+  getDb()
+    .prepare(
+      "INSERT OR REPLACE INTO channel_tools (channel_id, channel_name, tools, updated_at) VALUES (?, ?, ?, unixepoch())"
+    )
+    .run(channelId, channelName, tools.join(","));
+}
+
+export function clearChannelTools(channelId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM channel_tools WHERE channel_id = ?")
+    .run(channelId);
+  return result.changes > 0;
+}
+
+export interface ChannelToolsRow {
+  channel_id: string;
+  channel_name: string;
+  tools: string;
+}
+
+export function listChannelTools(): ChannelToolsRow[] {
+  return getDb()
+    .prepare("SELECT channel_id, channel_name, tools FROM channel_tools ORDER BY channel_name")
+    .all() as ChannelToolsRow[];
+}
+
+/**
+ * Resolve the OpenCode agent name based on channel agent and tools.
+ * If a custom agent is set, it takes priority (tools are ignored).
+ * Otherwise, tools map to predefined agent variants (e.g. build-linear, build-sentry).
+ */
+export function resolveAgent(channelAgent?: string, channelTools?: string[]): string | undefined {
+  if (channelAgent) return channelAgent;
+  if (!channelTools || channelTools.length === 0) return undefined;
+  const sorted = [...channelTools].sort();
+  return `build-${sorted.join("-")}`;
 }
 
 export function closeDb(): void {

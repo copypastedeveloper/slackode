@@ -107,6 +107,37 @@ sed -i 's|"model": "[^"]*"|"model": "'"${PROVIDER}/${MODEL}"'"|' /app/repo/openc
 mkdir -p /app/repo/.opencode/rules
 cp /app/.opencode/rules/*.md /app/repo/.opencode/rules/
 
+# ── Inject MCP server configs if tokens are available ──
+# Uses Node.js (already installed) to safely modify JSON without sed fragility.
+node -e "
+const fs = require('fs');
+const config = JSON.parse(fs.readFileSync('/app/repo/opencode.json', 'utf-8'));
+config.mcp = config.mcp || {};
+if (process.env.LINEAR_API_KEY) {
+  config.mcp.linear = {
+    type: 'remote',
+    url: 'https://mcp.linear.app/mcp',
+    headers: { Authorization: 'Bearer ' + process.env.LINEAR_API_KEY },
+    oauth: false,
+    enabled: true
+  };
+  console.log('MCP: Linear server configured (remote, bearer token).');
+}
+if (process.env.SENTRY_ACCESS_TOKEN) {
+  config.mcp.sentry = {
+    type: 'local',
+    command: ['npx', '-y', '@sentry/mcp-server', 'stdio'],
+    environment: { SENTRY_ACCESS_TOKEN: process.env.SENTRY_ACCESS_TOKEN },
+    enabled: true
+  };
+  console.log('MCP: Sentry server configured (stdio, access token).');
+}
+if (!process.env.LINEAR_API_KEY && !process.env.SENTRY_ACCESS_TOKEN) {
+  console.log('MCP: No tool tokens configured. Set LINEAR_API_KEY and/or SENTRY_ACCESS_TOKEN to enable.');
+}
+fs.writeFileSync('/app/repo/opencode.json', JSON.stringify(config, null, 2));
+"
+
 # ── Start OpenCode server ──
 echo "Starting OpenCode server..."
 cd /app/repo

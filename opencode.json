@@ -12,7 +12,9 @@
     "todoread": false,
     "webfetch": false,
     "websearch": false,
-    "question": false
+    "question": false,
+    "linear*": false,
+    "sentry*": false
   },
   "permission": {
     "edit": "deny",
@@ -35,6 +37,103 @@
         "grep": true,
         "glob": true,
         "list": true,
+        "skill": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false
+      },
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "allow"
+        },
+        "skill": {
+          "*": "deny"
+        },
+        "task": {
+          "*": "deny"
+        }
+      }
+    },
+    "build-linear": {
+      "description": "Read-only Q&A assistant with Linear issue tracking tools",
+      "tools": {
+        "bash": true,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "linear*": true,
+        "skill": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false
+      },
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "allow"
+        },
+        "skill": {
+          "*": "deny"
+        },
+        "task": {
+          "*": "deny"
+        }
+      }
+    },
+    "build-sentry": {
+      "description": "Read-only Q&A assistant with Sentry error monitoring tools",
+      "tools": {
+        "bash": true,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "sentry*": true,
+        "skill": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false
+      },
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "allow"
+        },
+        "skill": {
+          "*": "deny"
+        },
+        "task": {
+          "*": "deny"
+        }
+      }
+    },
+    "build-linear-sentry": {
+      "description": "Read-only Q&A assistant with Linear and Sentry tools",
+      "tools": {
+        "bash": true,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "linear*": true,
+        "sentry*": true,
         "skill": false,
         "write": false,
         "edit": false,

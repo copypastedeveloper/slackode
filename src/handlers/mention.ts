@@ -1,5 +1,10 @@
 import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from "@slack/bolt";
-import { getOrCreateSession, getChannelAgent, setChannelAgent, clearChannelAgent, listChannelAgents } from "../sessions.js";
+import {
+  getOrCreateSession,
+  getChannelAgent, setChannelAgent, clearChannelAgent, listChannelAgents,
+  getChannelTools, setChannelTools, clearChannelTools, listChannelTools,
+  resolveAgent, KNOWN_TOOLS,
+} from "../sessions.js";
 import { askQuestion } from "../opencode.js";
 import type { AskResult } from "../opencode.js";
 import { markdownToSlack, splitMessage } from "../utils/formatting.js";
@@ -14,6 +19,11 @@ type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
  *   @bot config get agent
  *   @bot config clear agent
  *   @bot config list agents
+ *   @bot config set tools <tool1,tool2>
+ *   @bot config get tools
+ *   @bot config clear tools
+ *   @bot config list tools
+ *   @bot config available tools
  *
  * Returns the reply text if it was a config command, or null if not.
  */
@@ -61,6 +71,56 @@ async function handleConfigCommand(
     }
     const lines = rows.map((r) => `• #${r.channel_name} → \`${r.agent}\``);
     return `*Channel agent mappings:*\n${lines.join("\n")}`;
+  }
+
+  // --- Tool commands ---
+
+  // config set tools <tool1,tool2>
+  const setToolsMatch = subcommand.match(/^set\s+tools?\s+(\S+)$/i);
+  if (setToolsMatch) {
+    const requested = setToolsMatch[1].split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+    const invalid = requested.filter((t) => !(t in KNOWN_TOOLS));
+    if (invalid.length > 0) {
+      const available = Object.keys(KNOWN_TOOLS).map((k) => `\`${k}\``).join(", ");
+      return `Unknown tool${invalid.length > 1 ? "s" : ""}: ${invalid.map((t) => `\`${t}\``).join(", ")}. Available tools: ${available}`;
+    }
+    const unique = [...new Set(requested)].sort();
+    setChannelTools(channelId, channelName, unique);
+    return `Tools for #${channelName} set to ${unique.map((t) => `\`${t}\``).join(", ")}. Messages in this channel can now reference ${unique.join(" and ")} data.`;
+  }
+
+  // config get tools
+  if (/^get\s+tools?$/i.test(subcommand)) {
+    const tools = getChannelTools(channelId);
+    if (tools && tools.length > 0) {
+      return `#${channelName} has tools enabled: ${tools.map((t) => `\`${t}\``).join(", ")}`;
+    }
+    return `#${channelName} has no extra tools configured — using codebase Q&A only.`;
+  }
+
+  // config clear tools
+  if (/^clear\s+tools?$/i.test(subcommand)) {
+    const removed = clearChannelTools(channelId);
+    if (removed) {
+      return `Tools for #${channelName} cleared. This channel will use codebase Q&A only.`;
+    }
+    return `#${channelName} had no tools configured.`;
+  }
+
+  // config list tools
+  if (/^list\s+tools?$/i.test(subcommand)) {
+    const rows = listChannelTools();
+    if (rows.length === 0) {
+      return "No channel-specific tools configured.";
+    }
+    const lines = rows.map((r) => `• #${r.channel_name} → ${r.tools.split(",").map((t: string) => `\`${t}\``).join(", ")}`);
+    return `*Channel tool mappings:*\n${lines.join("\n")}`;
+  }
+
+  // config available tools
+  if (/^available\s+tools?$/i.test(subcommand)) {
+    const lines = Object.entries(KNOWN_TOOLS).map(([name, desc]) => `• \`${name}\` — ${desc}`);
+    return `*Available tools:*\n${lines.join("\n")}`;
   }
 
   return null;
@@ -111,10 +171,12 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
     // Set up throttled progress updates
     const progress = createProgressUpdater(client, event.channel, placeholderTs);
 
-    const agent = getChannelAgent(event.channel);
+    const channelAgent = getChannelAgent(event.channel);
+    const channelTools = getChannelTools(event.channel);
+    const agent = resolveAgent(channelAgent, channelTools);
     const result: AskResult = await askQuestion(sessionId, question, slackCtx, (status) => {
       progress.update(status);
-    }, isNew, agent);
+    }, isNew, agent, channelTools);
 
     progress.stop();
 
