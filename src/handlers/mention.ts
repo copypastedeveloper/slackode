@@ -135,7 +135,18 @@ async function handleConfigCommand(
     return `*Available tools:*\n${lines.join("\n")}`;
   }
 
-  return null;
+  return [
+    "Unrecognized config command. Available config commands:",
+    "• config set agent <name>",
+    "• config get agent",
+    "• config clear agent",
+    "• config list agents",
+    "• config set tools <tool1,tool2>",
+    "• config get tools",
+    "• config clear tools",
+    "• config list tools",
+    "• config available tools",
+  ].join("\n");
 }
 
 export async function handleMention({ event, client, context }: MentionArgs): Promise<void> {
