@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { createSession } from "./opencode.js";
 import type { SlackContext } from "./utils/slack-context.js";
 
@@ -110,11 +111,20 @@ export function listChannelAgents(): ChannelAgentRow[] {
 
 // --- Channel-to-tools mapping ---
 
+/** Load tool definitions from tools.json so adding a new tool is just a config change. */
+interface ToolDef { description: string; instruction: string; env: string; mcp: Record<string, unknown> }
+const TOOLS_JSON_PATH = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "tools.json");
+const toolDefs: Record<string, ToolDef> = JSON.parse(readFileSync(TOOLS_JSON_PATH, "utf-8"));
+
 /** Tools that can be enabled per-channel via `config set tools`. */
-export const KNOWN_TOOLS: Record<string, string> = {
-  linear: "Linear issue tracking — search issues, projects, and teams",
-  sentry: "Sentry error monitoring — search errors, exceptions, and performance data",
-};
+export const KNOWN_TOOLS: Record<string, string> = Object.fromEntries(
+  Object.entries(toolDefs).map(([name, def]) => [name, def.description])
+);
+
+/** Per-tool instructions for the system prompt. */
+export const TOOL_INSTRUCTIONS: Record<string, string> = Object.fromEntries(
+  Object.entries(toolDefs).map(([name, def]) => [name, def.instruction])
+);
 
 export function getChannelTools(channelId: string): string[] | undefined {
   const row = getDb()

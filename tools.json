@@ -1,0 +1,23 @@
+{
+  "linear": {
+    "description": "Linear issue tracking — search issues, projects, and teams",
+    "instruction": "You have access to Linear tools for looking up issues, projects, teams, and work status. Use these when the user asks about tickets, issues, sprints, project progress, or task assignments. Only read and search — do NOT create, update, or delete anything in Linear.",
+    "env": "LINEAR_API_KEY",
+    "mcp": {
+      "type": "remote",
+      "url": "https://mcp.linear.app/mcp",
+      "headerAuth": "Bearer",
+      "oauth": false
+    }
+  },
+  "sentry": {
+    "description": "Sentry error monitoring — search errors, exceptions, and performance data",
+    "instruction": "You have access to Sentry tools for looking up error reports, exceptions, and performance data. Use these when the user asks about errors, crashes, alerts, or monitoring. Only read and search — do NOT resolve, ignore, or modify anything in Sentry.",
+    "env": "SENTRY_ACCESS_TOKEN",
+    "mcp": {
+      "type": "local",
+      "command": ["npx", "-y", "@sentry/mcp-server", "stdio"],
+      "envPassthrough": true
+    }
+  }
+}

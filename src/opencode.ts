@@ -45,17 +45,7 @@ export async function createSession(title: string): Promise<string> {
   return result.data.id;
 }
 
-/** Per-tool instructions added to the system prompt when a channel has tools enabled. */
-const TOOL_INSTRUCTIONS: Record<string, string> = {
-  linear:
-    "You have access to Linear tools for looking up issues, projects, teams, and work status. " +
-    "Use these when the user asks about tickets, issues, sprints, project progress, or task assignments. " +
-    "Only read and search — do NOT create, update, or delete anything in Linear.",
-  sentry:
-    "You have access to Sentry tools for looking up error reports, exceptions, and performance data. " +
-    "Use these when the user asks about errors, crashes, alerts, or monitoring. " +
-    "Only read and search — do NOT resolve, ignore, or modify anything in Sentry.",
-};
+import { TOOL_INSTRUCTIONS } from "./sessions.js";
 
 /**
  * Build a context prefix to prepend to the user's question.
