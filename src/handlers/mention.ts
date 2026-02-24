@@ -85,6 +85,10 @@ async function handleConfigCommand(
       return `Unknown tool${invalid.length > 1 ? "s" : ""}: ${invalid.map((t) => `\`${t}\``).join(", ")}. Available tools: ${available}`;
     }
     const unique = [...new Set(requested)].sort();
+    if (unique.length === 0) {
+      const available = Object.keys(KNOWN_TOOLS).map((k) => `\`${k}\``).join(", ");
+      return `No valid tools specified. Please provide at least one tool name. Available tools: ${available}`;
+    }
     setChannelTools(channelId, channelName, unique);
     return `Tools for #${channelName} set to ${unique.map((t) => `\`${t}\``).join(", ")}. Messages in this channel can now reference ${unique.join(" and ")} data.`;
   }
