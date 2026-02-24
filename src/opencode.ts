@@ -147,7 +147,8 @@ export async function askQuestion(
   question: string,
   ctx?: SlackContext,
   onProgress?: ProgressCallback,
-  isNewSession?: boolean
+  isNewSession?: boolean,
+  agent?: string
 ): Promise<AskResult> {
   // Prepend context — full block for new sessions, short line for follow-ups
   const contextPrefix = ctx
@@ -168,6 +169,7 @@ export async function askQuestion(
   await getClient().session.promptAsync({
     path: { id: sessionId },
     body: {
+      ...(agent ? { agent } : {}),
       parts: [
         {
           type: "text",

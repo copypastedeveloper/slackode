@@ -5,6 +5,7 @@ import type { AskResult } from "../opencode.js";
 import { markdownToSlack, splitMessage } from "../utils/formatting.js";
 import { getSlackContext } from "../utils/slack-context.js";
 import { createProgressUpdater } from "../utils/progress.js";
+import { getAgentForChannel } from "../channel-config.js";
 
 type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
 
@@ -42,9 +43,10 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
     // Set up throttled progress updates
     const progress = createProgressUpdater(client, event.channel, placeholderTs);
 
+    const agent = getAgentForChannel(slackCtx.channelName);
     const result: AskResult = await askQuestion(sessionId, question, slackCtx, (status) => {
       progress.update(status);
-    }, isNew);
+    }, isNew, agent);
 
     progress.stop();
 
