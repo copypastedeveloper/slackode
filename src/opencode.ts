@@ -5,6 +5,7 @@ import {
 } from "@opencode-ai/sdk";
 import { TOOL_INSTRUCTIONS } from "./tools.js";
 import type { SlackContext } from "./utils/slack-context.js";
+import type { ConvertedFile } from "./utils/slack-files.js";
 
 // 10 minute timeout for non-streaming calls (session create, preamble).
 // The agent may run long-running bash commands (find, grep across a large repo).
@@ -190,6 +191,7 @@ export interface AskQuestionOpts {
   isNewSession?: boolean;
   agent?: string;
   tools?: string[];
+  files?: ConvertedFile[];
 }
 
 /**
@@ -206,7 +208,7 @@ function getToolStateType(part: { state?: unknown }): string | undefined {
  * Calls onProgress with status updates as OpenCode works.
  */
 export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
-  const { sessionId, question, ctx, onProgress, isNewSession, agent, tools } = opts;
+  const { sessionId, question, ctx, onProgress, isNewSession, agent, tools, files } = opts;
 
   // Prepend context — full block for new sessions, short line for follow-ups
   const contextPrefix = ctx
@@ -223,17 +225,22 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   const subscription = await sseClient.event.subscribe();
   const stream = subscription.stream;
 
+  // Build parts array: text first, then any file attachments
+  const parts: Array<{ type: "text"; text: string } | { type: "file"; mime: string; url: string; filename?: string }> = [
+    { type: "text", text: contextPrefix + wrappedQuestion },
+  ];
+  if (files && files.length > 0) {
+    for (const f of files) {
+      parts.push({ type: "file", mime: f.mime, url: f.dataUri, filename: f.filename });
+    }
+  }
+
   // Fire the prompt asynchronously
   await getClient().session.promptAsync({
     path: { id: sessionId },
     body: {
       ...(agent ? { agent } : {}),
-      parts: [
-        {
-          type: "text",
-          text: contextPrefix + wrappedQuestion,
-        },
-      ],
+      parts,
     },
   });
 

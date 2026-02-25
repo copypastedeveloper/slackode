@@ -1,4 +1,5 @@
 import type { WebClient } from "@slack/web-api";
+import type { SlackFile } from "./slack-files.js";
 
 export interface SlackContext {
   userId: string;
@@ -71,10 +72,16 @@ export async function getSlackContext(
 // Max characters of thread context to include in the prompt
 const MAX_THREAD_CONTEXT_CHARS = 3000;
 
+export interface ThreadContextResult {
+  text: string;
+  files: SlackFile[];
+}
+
 /**
  * Fetch the preceding messages in a Slack thread and format them as context.
  * Excludes bot messages and the current message (identified by currentTs).
- * Returns a formatted string, or empty string if no thread or no messages.
+ * Also collects file attachments (images/PDFs) from thread messages.
+ * Returns formatted text + files, or empty result if no thread or no messages.
  */
 export async function fetchThreadContext(
   client: WebClient,
@@ -82,7 +89,7 @@ export async function fetchThreadContext(
   threadTs: string,
   currentTs: string,
   botUserId?: string
-): Promise<string> {
+): Promise<ThreadContextResult> {
   try {
     const result = await client.conversations.replies({
       channel: channelId,
@@ -96,13 +103,27 @@ export async function fetchThreadContext(
     const userNames = new Map<string, string>();
 
     const lines: string[] = [];
+    const threadFiles: SlackFile[] = [];
+
     for (const msg of messages) {
       // Skip the current message (the one that tagged the bot)
       if (msg.ts === currentTs) continue;
       // Skip bot messages
       if (msg.bot_id) continue;
       if (botUserId && msg.user === botUserId) continue;
-      // Skip messages without text
+
+      // Collect file attachments from thread messages
+      const msgAny = msg as Record<string, unknown>;
+      if (Array.isArray(msgAny.files)) {
+        for (const f of msgAny.files) {
+          const sf = f as SlackFile;
+          if (sf.url_private && sf.mimetype && sf.name) {
+            threadFiles.push(sf);
+          }
+        }
+      }
+
+      // Skip messages without text for the text context
       if (!msg.text) continue;
 
       // Resolve user name
@@ -125,23 +146,24 @@ export async function fetchThreadContext(
       lines.push(`${name}: ${msg.text}`);
     }
 
-    if (lines.length === 0) return "";
-
-    // Truncate from the beginning if too long (keep the most recent messages)
-    let combined = lines.join("\n");
-    if (combined.length > MAX_THREAD_CONTEXT_CHARS) {
-      // Keep the tail (most recent messages)
-      combined = combined.slice(-MAX_THREAD_CONTEXT_CHARS);
-      // Clean up partial first line
-      const firstNewline = combined.indexOf("\n");
-      if (firstNewline > 0) {
-        combined = "...\n" + combined.slice(firstNewline + 1);
+    let combined = "";
+    if (lines.length > 0) {
+      combined = lines.join("\n");
+      // Truncate from the beginning if too long (keep the most recent messages)
+      if (combined.length > MAX_THREAD_CONTEXT_CHARS) {
+        // Keep the tail (most recent messages)
+        combined = combined.slice(-MAX_THREAD_CONTEXT_CHARS);
+        // Clean up partial first line
+        const firstNewline = combined.indexOf("\n");
+        if (firstNewline > 0) {
+          combined = "...\n" + combined.slice(firstNewline + 1);
+        }
       }
     }
 
-    return combined;
+    return { text: combined, files: threadFiles };
   } catch (err) {
     console.warn("Failed to fetch thread context:", err);
-    return "";
+    return { text: "", files: [] };
   }
 }

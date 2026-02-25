@@ -7,6 +7,7 @@ import {
 } from "../sessions.js";
 import { KNOWN_TOOLS, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
 import { getSlackContext, fetchThreadContext } from "../utils/slack-context.js";
+import { downloadFiles, type SlackFile } from "../utils/slack-files.js";
 import { handleQuestion } from "./shared.js";
 
 type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
@@ -176,7 +177,16 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
   // Strip the <@BOT_ID> mention from the text
   const question = event.text.replace(new RegExp(`<@${botUserId}>\\s*`, "g"), "").trim();
 
-  if (!question) {
+  // Extract file attachments from the triggering message
+  const eventFiles: SlackFile[] =
+    "files" in event && Array.isArray((event as unknown as { files?: unknown[] }).files)
+      ? ((event as unknown as { files: SlackFile[] }).files)
+      : [];
+  const hasFiles = eventFiles.length > 0;
+
+  // If there's no question text, no files on this message, and it's not a thread
+  // (so no chance of thread files), bail early.
+  if (!question && !hasFiles && !event.thread_ts) {
     await client.chat.postMessage({
       channel: event.channel,
       thread_ts: event.thread_ts ?? event.ts,
@@ -187,16 +197,18 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
 
   const userId = event.user ?? "unknown";
 
-  // Check for config commands before doing any Q&A work
+  // Check for config commands before doing any Q&A work (skip when files are attached)
   const slackCtx = await getSlackContext(client, userId, event.channel, "channel");
-  const configReply = await handleConfigCommand(question, event.channel, slackCtx.channelName, userId);
-  if (configReply) {
-    await client.chat.postMessage({
-      channel: event.channel,
-      thread_ts: event.thread_ts ?? event.ts,
-      text: configReply,
-    });
-    return;
+  if (!hasFiles && question) {
+    const configReply = await handleConfigCommand(question, event.channel, slackCtx.channelName, userId);
+    if (configReply) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: event.thread_ts ?? event.ts,
+        text: configReply,
+      });
+      return;
+    }
   }
 
   const threadTs = event.thread_ts ?? event.ts;
@@ -211,15 +223,39 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
   const placeholderTs = placeholder.ts!;
 
   try {
-    // If this is a new thread mention, fetch the preceding conversation
-    // so the agent has context. We check this before handleQuestion because
-    // we need the event metadata (thread_ts, ts, botUserId).
+    // If this is a thread mention, fetch preceding conversation + any files
+    // shared earlier in the thread.
     let threadContext: string | undefined;
+    let allFiles = [...eventFiles];
     if (event.thread_ts) {
-      threadContext = await fetchThreadContext(
+      const ctx = await fetchThreadContext(
         client, event.channel, event.thread_ts, event.ts, context.botUserId
-      ) || undefined;
+      );
+      threadContext = ctx.text || undefined;
+      if (ctx.files.length > 0) {
+        allFiles = [...allFiles, ...ctx.files];
+      }
     }
+
+    const hasAnyFiles = allFiles.length > 0;
+
+    // Download file attachments (from triggering message + thread)
+    const files = hasAnyFiles
+      ? await downloadFiles(allFiles, client)
+      : undefined;
+
+    // If there was no text and all file downloads failed, show an error
+    if (!question && (!files || files.length === 0)) {
+      await client.chat.update({
+        channel: event.channel,
+        ts: placeholderTs,
+        text: "_I couldn't process the attached file(s). Please try again with a supported image (PNG, JPEG, GIF, WebP) or PDF under 10 MB._",
+      });
+      return;
+    }
+
+    // Default question when files are attached without text
+    const finalQuestion = question || "What is in this file?";
 
     const channelAgent = getChannelAgent(event.channel);
     const channelTools = getChannelTools(event.channel);
@@ -230,11 +266,12 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
       channel: event.channel,
       threadTs,
       placeholderTs,
-      question,
+      question: finalQuestion,
       slackCtx,
       agent,
       tools: channelTools,
       threadContext,
+      files,
     });
   } catch (error) {
     console.error("Error handling mention:", error);
