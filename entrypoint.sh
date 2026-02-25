@@ -61,29 +61,36 @@ esac
 echo "Provider: $PROVIDER, Model: $MODEL"
 
 # ── Clone or update the repo ──
+# Support legacy TARGET_REPO by constructing REPO_URL from it
+if [ -z "$REPO_URL" ] && [ -n "$TARGET_REPO" ]; then
+  REPO_URL="https://github.com/${TARGET_REPO}.git"
+fi
+
+if [ -z "$REPO_URL" ]; then
+  echo "ERROR: REPO_URL is not set (e.g. REPO_URL=https://github.com/your-org/your-repo.git)"
+  exit 1
+fi
+
+# Derive display name from URL if TARGET_REPO is not set
+# e.g. https://gitlab.com/group/repo.git → group/repo
 if [ -z "$TARGET_REPO" ]; then
-  echo "ERROR: TARGET_REPO is not set (e.g. TARGET_REPO=your-org/your-repo)"
-  exit 1
+  TARGET_REPO="$(echo "$REPO_URL" | sed -E 's|^https?://[^/]+/||; s|\.git$||')"
 fi
+export TARGET_REPO
 
-# Validate TARGET_REPO format (owner/repo, alphanumeric with hyphens/underscores/dots)
-if ! echo "$TARGET_REPO" | grep -qE '^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$'; then
-  echo "ERROR: TARGET_REPO must be in 'owner/repo' format (got: $TARGET_REPO)"
-  exit 1
-fi
+# GIT_TOKEN with fallback to legacy GITHUB_TOKEN
+GIT_TOKEN="${GIT_TOKEN:-$GITHUB_TOKEN}"
 
-REPO_URL="https://github.com/${TARGET_REPO}.git"
-
-if [ -n "$GITHUB_TOKEN" ]; then
+if [ -n "$GIT_TOKEN" ]; then
   # Use GIT_ASKPASS to supply credentials without embedding them in the URL
   # or persisting them in .git/config
   GIT_ASKPASS_SCRIPT="$(mktemp)"
-  printf '#!/bin/sh\necho "%s"\n' "$GITHUB_TOKEN" > "$GIT_ASKPASS_SCRIPT"
+  printf '#!/bin/sh\necho "%s"\n' "$GIT_TOKEN" > "$GIT_ASKPASS_SCRIPT"
   chmod +x "$GIT_ASKPASS_SCRIPT"
   export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
   export GIT_TERMINAL_PROMPT=0
 else
-  echo "WARNING: GITHUB_TOKEN is not set — clone may fail for private repos."
+  echo "WARNING: GIT_TOKEN is not set — clone may fail for private repos."
 fi
 
 if [ ! -d /app/repo/.git ]; then

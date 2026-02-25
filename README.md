@@ -2,7 +2,7 @@
   <img src="assets/logo.svg" alt="Slackode" width="400">
 </p>
 
-A Slack bot that answers questions about your codebase. Point it at any GitHub repo and ask questions via @mentions or DMs — it uses [OpenCode](https://opencode.ai) to explore the code and respond with accurate, cited answers.
+A Slack bot that answers questions about your codebase. Point it at any git repo (GitHub, GitLab, Bitbucket, or self-hosted) and ask questions via @mentions or DMs — it uses [OpenCode](https://opencode.ai) to explore the code and respond with accurate, cited answers.
 
 ## How it works
 
@@ -20,7 +20,7 @@ The bot is strictly **read-only** — it will never suggest code changes, write 
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 - A Slack workspace where you can create apps
-- A GitHub account with access to the target repo
+- Access to the target git repo (GitHub, GitLab, Bitbucket, or self-hosted)
 - A GitHub Copilot subscription (default LLM provider) or API key for another [supported provider](#providers)
 
 ## Setup
@@ -83,11 +83,14 @@ Standard GitHub PATs (`ghp_`, `github_pat_`) do **not** work for Copilot auth �
    ```
 4. The `access` field value (starts with `gho_`) is your `COPILOT_TOKEN`
 
-### 3. Create a GitHub PAT
+### 3. Create a Git PAT
 
-If your target repo is private, create a [fine-grained personal access token](https://github.com/settings/tokens?type=beta) with **Contents: Read** access to the repo. This is your `GITHUB_TOKEN`.
+If your target repo is private, create a personal access token with read access:
+- **GitHub**: [Fine-grained token](https://github.com/settings/tokens?type=beta) with **Contents: Read**
+- **GitLab**: [Project access token](https://docs.gitlab.com/user/project/settings/project_access_tokens/) with **read_repository**
+- **Bitbucket**: [Repository access token](https://support.atlassian.com/bitbucket-cloud/docs/repository-access-tokens/) with **Read** scope
 
-For public repos, this is optional but avoids rate limiting.
+This is your `GIT_TOKEN`. For public repos, this is optional but avoids rate limiting.
 
 ### 4. Configure environment
 
@@ -100,8 +103,8 @@ Edit `.env` and fill in all values:
 ```env
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
-TARGET_REPO=your-org/your-repo
-GITHUB_TOKEN=ghp_...
+REPO_URL=https://github.com/your-org/your-repo.git
+GIT_TOKEN=ghp_...
 
 # Default provider (GitHub Copilot)
 PROVIDER=github-copilot
@@ -266,8 +269,9 @@ The entrypoint reads `tools.json` on startup, configures MCP servers for any too
 |---------|----------|-------------|
 | `SLACK_BOT_TOKEN` | Yes | Bot User OAuth Token (`xoxb-...`) |
 | `SLACK_APP_TOKEN` | Yes | App-Level Token with `connections:write` (`xapp-...`) |
-| `TARGET_REPO` | Yes | GitHub repo in `owner/name` format |
-| `GITHUB_TOKEN` | For private repos | PAT with repo read access |
+| `REPO_URL` | Yes | Git repo URL (e.g. `https://github.com/org/repo.git`) |
+| `GIT_TOKEN` | For private repos | PAT with repo read access (any provider) |
+| `TARGET_REPO` | No | Display name override (derived from `REPO_URL` if not set) |
 | `PROVIDER` | No | LLM provider (default: `github-copilot`) |
 | `MODEL` | No | Model ID (default: `claude-sonnet-4.6`) |
 | `COPILOT_TOKEN` | For github-copilot | GitHub Copilot OAuth token (`gho_...`) |
@@ -343,7 +347,7 @@ Slackode is designed to be safe to deploy on a shared network. The following mea
 - Other providers use standard API key env vars passed directly to the container
 
 **Input validation**
-- `TARGET_REPO` is validated against a strict `owner/repo` regex on startup
+- `REPO_URL` is validated on startup; `TARGET_REPO` display name is derived automatically
 - User questions are wrapped in `<user_question>` delimiter tags with explicit anti-injection instructions so the LLM treats them as opaque questions, not directives
 
 ## License
