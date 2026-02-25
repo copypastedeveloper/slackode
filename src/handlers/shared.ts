@@ -7,6 +7,7 @@ import {
 import { askQuestion } from "../opencode.js";
 import { markdownToSlack, splitMessage } from "../utils/formatting.js";
 import type { SlackContext } from "../utils/slack-context.js";
+import type { ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
 
 export interface HandleQuestionOpts {
@@ -22,6 +23,8 @@ export interface HandleQuestionOpts {
   tools?: string[];
   /** Pre-fetched thread context for mid-thread @mentions. */
   threadContext?: string;
+  /** File attachments (images/PDFs) converted to data URIs. */
+  files?: ConvertedFile[];
 }
 
 /**
@@ -30,7 +33,7 @@ export interface HandleQuestionOpts {
  * and posting the response back to Slack.
  */
 export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
-  const { client, channel, threadTs, placeholderTs, question, slackCtx, agent, tools, threadContext } = opts;
+  const { client, channel, threadTs, placeholderTs, question, slackCtx, agent, tools, threadContext, files } = opts;
 
   // Attach per-channel custom prompt if configured
   const channelConfig = getChannelConfig(channel);
@@ -62,6 +65,7 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     isNewSession: needsFullContext,
     agent,
     tools,
+    files,
   });
 
   // If compaction occurred during this response, flag the session so the
