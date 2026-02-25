@@ -3,13 +3,16 @@ import {
   getOrCreateSession,
   getChannelAgent, setChannelAgent, clearChannelAgent, listChannelAgents,
   getChannelTools, setChannelTools, clearChannelTools, listChannelTools,
+  getChannelConfig, setChannelConfig, clearChannelConfig,
   resolveAgent, KNOWN_TOOLS,
 } from "../sessions.js";
 import { askQuestion } from "../opencode.js";
 import type { AskResult } from "../opencode.js";
 import { markdownToSlack, splitMessage } from "../utils/formatting.js";
-import { getSlackContext } from "../utils/slack-context.js";
+import { getSlackContext, fetchThreadContext } from "../utils/slack-context.js";
 import { createProgressUpdater } from "../utils/progress.js";
+
+const MAX_CUSTOM_PROMPT_LENGTH = 1000;
 
 type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
 
@@ -30,7 +33,8 @@ type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
 async function handleConfigCommand(
   command: string,
   channelId: string,
-  channelName: string
+  channelName: string,
+  userId: string
 ): Promise<string | null> {
   const match = command.match(/^config\s+(.+)$/i);
   if (!match) return null;
@@ -135,6 +139,34 @@ async function handleConfigCommand(
     return `*Available tools:*\n${lines.join("\n")}`;
   }
 
+  // --- Custom prompt commands ---
+
+  // config set prompt <text>
+  const setPromptMatch = subcommand.match(/^set\s+prompt\s+(.+)$/is);
+  if (setPromptMatch) {
+    const prompt = setPromptMatch[1].trim();
+    if (prompt.length > MAX_CUSTOM_PROMPT_LENGTH) {
+      return `Custom instructions must be ${MAX_CUSTOM_PROMPT_LENGTH} characters or fewer (yours: ${prompt.length}).`;
+    }
+    setChannelConfig(channelId, prompt, userId);
+    return `Custom instructions set for #${channelName}:\n> ${prompt}`;
+  }
+
+  // config get prompt
+  if (/^(get|show)\s+prompt$/i.test(subcommand)) {
+    const config = getChannelConfig(channelId);
+    if (config) {
+      return `Custom instructions for #${channelName} (set by <@${config.configuredBy}>):\n> ${config.customPrompt}`;
+    }
+    return `#${channelName} has no custom instructions set.`;
+  }
+
+  // config clear prompt
+  if (/^clear\s+prompt$/i.test(subcommand)) {
+    clearChannelConfig(channelId);
+    return `Custom instructions cleared for #${channelName}.`;
+  }
+
   return [
     "Unrecognized config command. Available config commands:",
     "• config set agent <name>",
@@ -146,6 +178,9 @@ async function handleConfigCommand(
     "• config clear tools",
     "• config list tools",
     "• config available tools",
+    "• config set prompt <instructions>",
+    "• config get prompt",
+    "• config clear prompt",
   ].join("\n");
 }
 
@@ -163,9 +198,11 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
     return;
   }
 
+  const userId = event.user ?? "unknown";
+
   // Check for config commands before doing any Q&A work
-  const slackCtx = await getSlackContext(client, event.user ?? "unknown", event.channel, "channel");
-  const configReply = await handleConfigCommand(question, event.channel, slackCtx.channelName);
+  const slackCtx = await getSlackContext(client, userId, event.channel, "channel");
+  const configReply = await handleConfigCommand(question, event.channel, slackCtx.channelName, userId);
   if (configReply) {
     await client.chat.postMessage({
       channel: event.channel,
@@ -175,7 +212,6 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
     return;
   }
 
-  const userId = event.user ?? "unknown";
   const threadTs = event.thread_ts ?? event.ts;
 
   // Post a placeholder reply in the thread
@@ -189,7 +225,25 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
 
   try {
     const threadKey = threadTs;
+
+    // Attach per-channel custom prompt if configured
+    const channelConfig = getChannelConfig(event.channel);
+    if (channelConfig) {
+      slackCtx.customPrompt = channelConfig.customPrompt;
+    }
+
     const { sessionId, isNew } = await getOrCreateSession(threadKey, slackCtx);
+
+    // If this is a new session and the bot was tagged in an existing thread,
+    // fetch the preceding conversation so the agent has context.
+    if (isNew && event.thread_ts) {
+      const threadCtx = await fetchThreadContext(
+        client, event.channel, event.thread_ts, event.ts, context.botUserId
+      );
+      if (threadCtx) {
+        slackCtx.threadContext = threadCtx;
+      }
+    }
 
     // Set up throttled progress updates
     const progress = createProgressUpdater(client, event.channel, placeholderTs);

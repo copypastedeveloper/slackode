@@ -5,15 +5,16 @@ services:
     volumes:
       - repo-cache:/app/repo
       - opencode-data:/home/appuser/.local/share/opencode
-      - bot-data:/app/data
     environment:
-      - SESSIONS_DB_PATH=/app/data/sessions.db
+      - SESSIONS_DB_PATH=/home/appuser/.local/share/opencode/sessions.db
     read_only: true
     tmpfs:
-      - /tmp:size=100M
+      - /tmp:size=100M,exec,uid=1001,gid=1001
+      - /home/appuser/.local/state:size=10M,uid=1001,gid=1001
+      - /home/appuser/.config:size=10M,uid=1001,gid=1001
+      - /home/appuser/.cache:size=50M,uid=1001,gid=1001
     restart: unless-stopped
 
 volumes:
   repo-cache:
   opencode-data:
-  bot-data:
