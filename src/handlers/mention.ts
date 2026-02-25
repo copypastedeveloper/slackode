@@ -1,18 +1,13 @@
 import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from "@slack/bolt";
 import {
-  getOrCreateSession,
   getChannelAgent, setChannelAgent, clearChannelAgent, listChannelAgents,
   getChannelTools, setChannelTools, clearChannelTools, listChannelTools,
   getChannelConfig, setChannelConfig, clearChannelConfig,
-  resolveAgent, KNOWN_TOOLS,
+  resolveAgent,
 } from "../sessions.js";
-import { askQuestion } from "../opencode.js";
-import type { AskResult } from "../opencode.js";
-import { markdownToSlack, splitMessage } from "../utils/formatting.js";
+import { KNOWN_TOOLS, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
 import { getSlackContext, fetchThreadContext } from "../utils/slack-context.js";
-import { createProgressUpdater } from "../utils/progress.js";
-
-const MAX_CUSTOM_PROMPT_LENGTH = 1000;
+import { handleQuestion } from "./shared.js";
 
 type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
 
@@ -34,7 +29,7 @@ async function handleConfigCommand(
   command: string,
   channelId: string,
   channelName: string,
-  userId: string
+  _userId: string
 ): Promise<string | null> {
   const match = command.match(/^config\s+(.+)$/i);
   if (!match) return null;
@@ -45,14 +40,6 @@ async function handleConfigCommand(
   const setMatch = subcommand.match(/^set\s+agent\s+(\S+)$/i);
   if (setMatch) {
     const agent = setMatch[1];
-    // Validate that the agent exists before saving it, so we don't persist
-    // invalid agent names that OpenCode cannot resolve.
-    try {
-      // Use `any` here to avoid depending on the exact `resolveAgent` signature.
-      await (resolveAgent as any)(agent);
-    } catch (err) {
-      return `Agent \`${agent}\` is not recognized. Please make sure it is defined in your OpenCode configuration (e.g., opencode.json).`;
-    }
     setChannelAgent(channelId, channelName, agent);
     return `Agent for #${channelName} set to \`${agent}\`. Messages in this channel will now use the \`${agent}\` agent profile.`;
   }
@@ -148,7 +135,7 @@ async function handleConfigCommand(
     if (prompt.length > MAX_CUSTOM_PROMPT_LENGTH) {
       return `Custom instructions must be ${MAX_CUSTOM_PROMPT_LENGTH} characters or fewer (yours: ${prompt.length}).`;
     }
-    setChannelConfig(channelId, prompt, userId);
+    setChannelConfig(channelId, prompt, _userId);
     return `Custom instructions set for #${channelName}:\n> ${prompt}`;
   }
 
@@ -224,57 +211,31 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
   const placeholderTs = placeholder.ts!;
 
   try {
-    const threadKey = threadTs;
-
-    // Attach per-channel custom prompt if configured
-    const channelConfig = getChannelConfig(event.channel);
-    if (channelConfig) {
-      slackCtx.customPrompt = channelConfig.customPrompt;
-    }
-
-    const { sessionId, isNew } = await getOrCreateSession(threadKey, slackCtx);
-
-    // If this is a new session and the bot was tagged in an existing thread,
-    // fetch the preceding conversation so the agent has context.
-    if (isNew && event.thread_ts) {
-      const threadCtx = await fetchThreadContext(
+    // If this is a new thread mention, fetch the preceding conversation
+    // so the agent has context. We check this before handleQuestion because
+    // we need the event metadata (thread_ts, ts, botUserId).
+    let threadContext: string | undefined;
+    if (event.thread_ts) {
+      threadContext = await fetchThreadContext(
         client, event.channel, event.thread_ts, event.ts, context.botUserId
-      );
-      if (threadCtx) {
-        slackCtx.threadContext = threadCtx;
-      }
+      ) || undefined;
     }
-
-    // Set up throttled progress updates
-    const progress = createProgressUpdater(client, event.channel, placeholderTs);
 
     const channelAgent = getChannelAgent(event.channel);
     const channelTools = getChannelTools(event.channel);
     const agent = resolveAgent(channelAgent, channelTools);
-    const result: AskResult = await askQuestion(sessionId, question, slackCtx, (status) => {
-      progress.update(status);
-    }, isNew, agent, channelTools);
 
-    progress.stop();
-
-    // Format the response
-    const formatted = markdownToSlack(result.text);
-    const chunks = splitMessage(formatted);
-
-    // Update the placeholder with the first chunk (whether answer or question)
-    await client.chat.update({
+    await handleQuestion({
+      client,
       channel: event.channel,
-      ts: placeholderTs,
-      text: chunks[0],
+      threadTs,
+      placeholderTs,
+      question,
+      slackCtx,
+      agent,
+      tools: channelTools,
+      threadContext,
     });
-
-    for (let i = 1; i < chunks.length; i++) {
-      await client.chat.postMessage({
-        channel: event.channel,
-        thread_ts: threadTs,
-        text: chunks[i],
-      });
-    }
   } catch (error) {
     console.error("Error handling mention:", error);
     await client.chat.update({

@@ -1,12 +1,8 @@
 import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from "@slack/bolt";
-import { getOrCreateSession, getChannelConfig, setChannelConfig, clearChannelConfig } from "../sessions.js";
-import { askQuestion } from "../opencode.js";
-import type { AskResult } from "../opencode.js";
-import { markdownToSlack, splitMessage } from "../utils/formatting.js";
+import { getChannelConfig, setChannelConfig, clearChannelConfig } from "../sessions.js";
+import { MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
 import { getSlackContext } from "../utils/slack-context.js";
-import { createProgressUpdater } from "../utils/progress.js";
-
-const MAX_CUSTOM_PROMPT_LENGTH = 1000;
+import { handleQuestion } from "./shared.js";
 
 type MessageArgs = SlackEventMiddlewareArgs<"message"> & AllMiddlewareArgs;
 
@@ -25,13 +21,10 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
   const userId = "user" in event ? event.user : undefined;
   if (!userId) return;
 
-  // Compute thread key/ts early so /config replies can use them
-  const threadKey =
+  const threadTs =
     "thread_ts" in event && event.thread_ts
       ? event.thread_ts
       : event.ts;
-
-  const threadTs = "thread_ts" in event ? event.thread_ts : event.ts;
 
   // ── config commands ──
   if (question.startsWith("config ") || question === "config") {
@@ -91,59 +84,14 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
   try {
     const slackCtx = await getSlackContext(client, userId, event.channel, "dm");
 
-    // Attach per-channel custom prompt if configured
-    const channelConfig = getChannelConfig(event.channel);
-    if (channelConfig) {
-      slackCtx.customPrompt = channelConfig.customPrompt;
-    }
-
-    const { sessionId, isNew } = await getOrCreateSession(threadKey, slackCtx);
-
-    // Set up throttled progress updates
-    const progress = createProgressUpdater(client, event.channel, placeholderTs);
-
-    const result: AskResult = await askQuestion(sessionId, question, slackCtx, (status) => {
-      progress.update(status);
-    }, isNew);
-
-    progress.stop();
-
-    // Format the response
-    const formatted = markdownToSlack(result.text);
-    const chunks = splitMessage(formatted);
-
-    if (result.isQuestion) {
-      // Agent is asking a clarifying question — post it as a new message
-      // so it stays visible in the thread. Remove the placeholder.
-      await client.chat.update({
-        channel: event.channel,
-        ts: placeholderTs,
-        text: chunks[0],
-      });
-
-      for (let i = 1; i < chunks.length; i++) {
-        await client.chat.postMessage({
-          channel: event.channel,
-          thread_ts: threadTs,
-          text: chunks[i],
-        });
-      }
-    } else {
-      // Normal answer — update the placeholder with the final text
-      await client.chat.update({
-        channel: event.channel,
-        ts: placeholderTs,
-        text: chunks[0],
-      });
-
-      for (let i = 1; i < chunks.length; i++) {
-        await client.chat.postMessage({
-          channel: event.channel,
-          thread_ts: threadTs,
-          text: chunks[i],
-        });
-      }
-    }
+    await handleQuestion({
+      client,
+      channel: event.channel,
+      threadTs,
+      placeholderTs,
+      question,
+      slackCtx,
+    });
   } catch (error) {
     console.error("Error handling DM:", error);
     await client.chat.update({

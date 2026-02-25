@@ -1,6 +1,7 @@
 import bolt from "@slack/bolt";
 const { App } = bolt;
-import { initOpencode, generateContext } from "./opencode.js";
+import { initOpencode } from "./opencode.js";
+import { generateContext } from "./context-gen.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { closeDb } from "./sessions.js";

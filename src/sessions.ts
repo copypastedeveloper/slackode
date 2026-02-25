@@ -1,8 +1,6 @@
 import Database from "better-sqlite3";
 import path from "node:path";
-import { readFileSync } from "node:fs";
 import { createSession } from "./opencode.js";
-import type { SlackContext } from "./utils/slack-context.js";
 
 const DB_PATH = process.env.SESSIONS_DB_PATH || path.join(process.cwd(), "sessions.db");
 
@@ -16,9 +14,16 @@ function getDb(): Database.Database {
       CREATE TABLE IF NOT EXISTS sessions (
         thread_key TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
+        compacted INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    // Migration for existing databases that lack the compacted column.
+    try {
+      db.exec(`ALTER TABLE sessions ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0`);
+    } catch {
+      // Column already exists — ignore.
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS channel_agents (
         channel_id TEXT PRIMARY KEY,
@@ -62,13 +67,25 @@ export function saveSession(threadKey: string, sessionId: string): void {
     .run(threadKey, sessionId);
 }
 
+export function isSessionCompacted(threadKey: string): boolean {
+  const row = getDb()
+    .prepare("SELECT compacted FROM sessions WHERE thread_key = ?")
+    .get(threadKey) as { compacted: number } | undefined;
+  return row?.compacted === 1;
+}
+
+export function setSessionCompacted(threadKey: string, compacted: boolean): void {
+  getDb()
+    .prepare("UPDATE sessions SET compacted = ? WHERE thread_key = ?")
+    .run(compacted ? 1 : 0, threadKey);
+}
+
 /**
  * Get an existing session or create a new one.
  * Returns isNew so the caller can include full context in the first message.
  */
 export async function getOrCreateSession(
-  threadKey: string,
-  ctx?: SlackContext
+  threadKey: string
 ): Promise<{ sessionId: string; isNew: boolean }> {
   const existing = getSessionId(threadKey);
   if (existing) {
@@ -118,21 +135,6 @@ export function listChannelAgents(): ChannelAgentRow[] {
 }
 
 // --- Channel-to-tools mapping ---
-
-/** Load tool definitions from tools.json so adding a new tool is just a config change. */
-interface ToolDef { description: string; instruction: string; env: string; mcp: Record<string, unknown> }
-const TOOLS_JSON_PATH = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "tools.json");
-const toolDefs: Record<string, ToolDef> = JSON.parse(readFileSync(TOOLS_JSON_PATH, "utf-8"));
-
-/** Tools that can be enabled per-channel via `config set tools`. */
-export const KNOWN_TOOLS: Record<string, string> = Object.fromEntries(
-  Object.entries(toolDefs).map(([name, def]) => [name, def.description])
-);
-
-/** Per-tool instructions for the system prompt. */
-export const TOOL_INSTRUCTIONS: Record<string, string> = Object.fromEntries(
-  Object.entries(toolDefs).map(([name, def]) => [name, def.instruction])
-);
 
 export function getChannelTools(channelId: string): string[] | undefined {
   const row = getDb()
