@@ -11,6 +11,8 @@ export interface SlackContext {
   channelTopic: string;
   channelPurpose: string;
   channelType: "dm" | "channel";
+  customPrompt?: string;
+  threadContext?: string;
 }
 
 export async function getSlackContext(
@@ -64,4 +66,82 @@ export async function getSlackContext(
   }
 
   return ctx;
+}
+
+// Max characters of thread context to include in the prompt
+const MAX_THREAD_CONTEXT_CHARS = 3000;
+
+/**
+ * Fetch the preceding messages in a Slack thread and format them as context.
+ * Excludes bot messages and the current message (identified by currentTs).
+ * Returns a formatted string, or empty string if no thread or no messages.
+ */
+export async function fetchThreadContext(
+  client: WebClient,
+  channelId: string,
+  threadTs: string,
+  currentTs: string,
+  botUserId?: string
+): Promise<string> {
+  try {
+    const result = await client.conversations.replies({
+      channel: channelId,
+      ts: threadTs,
+      limit: 50,  // reasonable cap
+    });
+
+    const messages = result.messages ?? [];
+
+    // Build a user ID -> display name cache from the thread
+    const userNames = new Map<string, string>();
+
+    const lines: string[] = [];
+    for (const msg of messages) {
+      // Skip the current message (the one that tagged the bot)
+      if (msg.ts === currentTs) continue;
+      // Skip bot messages
+      if (msg.bot_id) continue;
+      if (botUserId && msg.user === botUserId) continue;
+      // Skip messages without text
+      if (!msg.text) continue;
+
+      // Resolve user name
+      let name = "Unknown";
+      if (msg.user) {
+        if (userNames.has(msg.user)) {
+          name = userNames.get(msg.user)!;
+        } else {
+          try {
+            const info = await client.users.info({ user: msg.user });
+            const resolved = info.user?.profile?.real_name ?? info.user?.name ?? "Unknown";
+            userNames.set(msg.user, resolved);
+            name = resolved;
+          } catch {
+            userNames.set(msg.user, "Unknown");
+          }
+        }
+      }
+
+      lines.push(`${name}: ${msg.text}`);
+    }
+
+    if (lines.length === 0) return "";
+
+    // Truncate from the beginning if too long (keep the most recent messages)
+    let combined = lines.join("\n");
+    if (combined.length > MAX_THREAD_CONTEXT_CHARS) {
+      // Keep the tail (most recent messages)
+      combined = combined.slice(-MAX_THREAD_CONTEXT_CHARS);
+      // Clean up partial first line
+      const firstNewline = combined.indexOf("\n");
+      if (firstNewline > 0) {
+        combined = "...\n" + combined.slice(firstNewline + 1);
+      }
+    }
+
+    return combined;
+  } catch (err) {
+    console.warn("Failed to fetch thread context:", err);
+    return "";
+  }
 }

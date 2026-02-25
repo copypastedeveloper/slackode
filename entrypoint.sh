@@ -107,6 +107,72 @@ sed -i 's|"model": "[^"]*"|"model": "'"${PROVIDER}/${MODEL}"'"|' /app/repo/openc
 mkdir -p /app/repo/.opencode/rules
 cp /app/.opencode/rules/*.md /app/repo/.opencode/rules/
 
+# ── Inject MCP servers and agent variants from tools.json ──
+# Reads tools.json, checks which env vars are set, injects MCP configs,
+# generates all agent variant combinations (2^N-1 for N enabled tools),
+# and adds global tool disables. Adding a new tool is just a tools.json entry.
+node -e "
+const fs = require('fs');
+const tools = JSON.parse(fs.readFileSync('/app/tools.json', 'utf-8'));
+const config = JSON.parse(fs.readFileSync('/app/repo/opencode.json', 'utf-8'));
+
+// Determine which tools have their env var set
+const enabled = [];
+for (const [name, def] of Object.entries(tools)) {
+  if (!process.env[def.env]) {
+    console.log('MCP: ' + name + ' skipped (' + def.env + ' not set).');
+    continue;
+  }
+  enabled.push(name);
+
+  // Build MCP server entry
+  config.mcp = config.mcp || {};
+  const mcp = def.mcp;
+  if (mcp.type === 'remote') {
+    config.mcp[name] = {
+      type: 'remote',
+      url: mcp.url,
+      headers: { Authorization: (mcp.headerAuth || 'Bearer') + ' ' + process.env[def.env] },
+      ...(mcp.oauth !== undefined ? { oauth: mcp.oauth } : {}),
+      enabled: true,
+    };
+  } else if (mcp.type === 'local') {
+    const entry = { type: 'local', command: mcp.command, enabled: true };
+    if (mcp.envPassthrough) {
+      entry.environment = { [def.env]: process.env[def.env] };
+    }
+    config.mcp[name] = entry;
+  }
+  console.log('MCP: ' + name + ' configured (' + mcp.type + ').');
+
+  // Disable this tool's MCP tools globally (agents opt in)
+  config.tools[name + '*'] = false;
+}
+
+if (enabled.length === 0) {
+  console.log('MCP: No tool tokens configured.');
+} else {
+  // Generate agent variants for every non-empty subset of enabled tools.
+  // E.g. [linear, sentry] -> build-linear, build-sentry, build-linear-sentry
+  const buildAgent = config.agent.build;
+  const count = enabled.length;
+  for (let mask = 1; mask < (1 << count); mask++) {
+    const subset = enabled.filter((_, i) => mask & (1 << i)).sort();
+    const agentName = 'build-' + subset.join('-');
+    const toolOverrides = {};
+    for (const t of subset) toolOverrides[t + '*'] = true;
+    config.agent[agentName] = {
+      description: buildAgent.description + ' with ' + subset.join(', ') + ' tools',
+      tools: { ...buildAgent.tools, ...toolOverrides },
+      permission: { ...buildAgent.permission },
+    };
+  }
+  console.log('MCP: Generated agent variants for: ' + enabled.join(', '));
+}
+
+fs.writeFileSync('/app/repo/opencode.json', JSON.stringify(config, null, 2));
+"
+
 # ── Start OpenCode server ──
 echo "Starting OpenCode server..."
 cd /app/repo
