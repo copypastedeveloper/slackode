@@ -155,26 +155,34 @@ Where are the serializers for that?
 
 The bot keeps conversation context within a thread — follow-ups don't need to repeat background information.
 
-### Custom instructions per channel
+### Channel configuration
 
-You can set custom instructions that are included with every question sent from a specific channel (or DM). Use them to steer the bot toward specific areas of the codebase or adjust the level of detail.
+All channel configuration is done via `@bot config <command>`. Settings persist in SQLite across restarts.
 
-**Set instructions:**
+**Custom instructions** — included with every question from this channel (max 1000 characters):
 ```
-@Slackode config set Focus on the Django REST framework views and serializers. Assume the reader is familiar with DRF.
-```
-
-**View current instructions:**
-```
-@Slackode config show
+@Slackode config set prompt Focus on the Django REST framework views and serializers. Assume the reader is familiar with DRF.
+@Slackode config get prompt
+@Slackode config clear prompt
 ```
 
-**Clear instructions:**
+**MCP tools** — enable external tools like Linear or Sentry for a channel (see [Adding MCP tools](#adding-mcp-tools)):
 ```
-@Slackode config clear
+@Slackode config set tools linear
+@Slackode config set tools linear,sentry
+@Slackode config get tools
+@Slackode config clear tools
+@Slackode config available tools
 ```
 
-Custom instructions work in both channels and DMs (max 1000 characters). The bot also reads the channel topic and purpose automatically, so for lightweight hints you can just put them there.
+**Agent override** — use a different OpenCode agent profile for a channel:
+```
+@Slackode config set agent my-custom-agent
+@Slackode config get agent
+@Slackode config clear agent
+```
+
+The bot also reads the channel topic and purpose automatically, so for lightweight hints you can just put them there.
 
 ## Architecture
 
@@ -200,8 +208,57 @@ Custom instructions work in both channels and DMs (max 1000 characters). The bot
 ```
 
 - **Slack Bot** — Bolt for JavaScript with Socket Mode. Handles @mentions and DMs, manages thread-to-session mapping in SQLite, streams progress updates.
-- **OpenCode Server** — runs inside the container, provides the agent runtime with tools (bash, read, grep, glob). Two agents: `build` (read-only Q&A, default) and `context` (generates reference docs about the repo).
+- **OpenCode Server** — runs inside the container, provides the agent runtime with tools (bash, read, grep, glob) and optional MCP servers. Agents: `build` (read-only Q&A, default), `context` (generates reference docs), and `build-<tools>` variants for channels with MCP tools enabled.
 - **Context Files** — auto-generated on startup and refreshed hourly. Provide the LLM with a pre-built understanding of the repo structure, key abstractions, and conventions so it can answer faster and more accurately.
+
+## Adding MCP tools
+
+Slackode can connect to external services via [MCP servers](https://modelcontextprotocol.io/) and expose them per-channel. Adding a tool requires no code changes — just add an entry to `tools.json` and set the API key.
+
+### Built-in tools
+
+| Tool | Service | Env var |
+|------|---------|---------|
+| `linear` | [Linear](https://linear.app) issue tracking | `LINEAR_API_KEY` |
+| `sentry` | [Sentry](https://sentry.io) error monitoring | `SENTRY_ACCESS_TOKEN` |
+
+To enable a tool, set its env var in `.env` and restart. Then assign it to a channel:
+```
+@Slackode config set tools linear
+```
+
+### Adding a new tool
+
+Add an entry to `tools.json`:
+
+```json
+{
+  "my-tool": {
+    "description": "Short description shown in 'config available tools'",
+    "instruction": "Prompt instructions telling the agent when and how to use this tool",
+    "env": "MY_TOOL_API_KEY",
+    "mcp": {
+      "type": "remote",
+      "url": "https://example.com/mcp",
+      "headerAuth": "Bearer",
+      "oauth": false
+    }
+  }
+}
+```
+
+For local MCP servers (run as a subprocess instead of connecting to a remote URL):
+```json
+{
+  "mcp": {
+    "type": "local",
+    "command": ["npx", "-y", "@example/mcp-server", "stdio"],
+    "envPassthrough": true
+  }
+}
+```
+
+The entrypoint reads `tools.json` on startup, configures MCP servers for any tools that have their env var set, and generates agent variants so each channel gets only the tools assigned to it.
 
 ## Configuration
 
@@ -214,6 +271,8 @@ Custom instructions work in both channels and DMs (max 1000 characters). The bot
 | `PROVIDER` | No | LLM provider (default: `github-copilot`) |
 | `MODEL` | No | Model ID (default: `claude-sonnet-4.6`) |
 | `COPILOT_TOKEN` | For github-copilot | GitHub Copilot OAuth token (`gho_...`) |
+| `LINEAR_API_KEY` | No | Linear API key (enables `linear` tool) |
+| `SENTRY_ACCESS_TOKEN` | No | Sentry auth token (enables `sentry` tool) |
 | `OPENCODE_URL` | No | OpenCode server URL (default: `http://127.0.0.1:4096`) |
 | `SESSIONS_DB_PATH` | No | Path to sessions SQLite DB (default: `./sessions.db`) |
 
