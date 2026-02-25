@@ -261,8 +261,20 @@ export async function askQuestion(
           } else if (stateType === "completed" || stateType === "error") {
             activeTools.delete(part.callID);
           }
+        } else if (part.type === "step-finish") {
+          // Break on the first "stop" — this means the model finished its
+          // response. If we wait for session.idle instead, we risk picking
+          // up a garbage auto-continue response that fires after context
+          // compaction (compaction → auto-continue → second step-finish).
+          const reason = (part as { reason?: string }).reason;
+          if (reason === "stop") {
+            done = true;
+            break;
+          }
         }
       } else if (evt.type === "session.idle") {
+        // Fallback: session.idle still breaks the loop in case step-finish
+        // is somehow missed (e.g. the model ends without a stop reason).
         if (evt.properties.sessionID === sessionId) {
           done = true;
           break;

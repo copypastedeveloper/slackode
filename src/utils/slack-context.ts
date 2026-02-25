@@ -52,7 +52,7 @@ export async function getSlackContext(
     try {
       const chanInfo = await client.conversations.info({ channel: channelId });
       if (chanInfo.channel && "name" in chanInfo.channel) {
-        ctx.channelName = `#${chanInfo.channel.name}`;
+        ctx.channelName = chanInfo.channel.name ?? ctx.channelName;
         // topic and purpose contain useful context about what the channel is for
         const chan = chanInfo.channel as Record<string, unknown>;
         const topic = chan.topic as { value?: string } | undefined;
