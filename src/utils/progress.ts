@@ -1,5 +1,5 @@
 import type { WebClient } from "@slack/web-api";
-import { markdownToSlack } from "./formatting.js";
+import { markdownToPlainText } from "./formatting.js";
 
 /** Throttled Slack message updater — at most once per interval */
 export function createProgressUpdater(
@@ -14,7 +14,7 @@ export function createProgressUpdater(
 
   function flush() {
     if (pending !== null) {
-      const text = markdownToSlack(pending);
+      const text = markdownToPlainText(pending);
       // Truncate to Slack's limit; we'll send the full response at the end
       const truncated = text.length > 3000 ? text.slice(0, 2997) + "..." : text;
       slackClient.chat.update({ channel, ts, text: truncated + "\n\n_Thinking..._" }).catch(() => {});

@@ -5,7 +5,7 @@ import {
   isSessionCompacted, setSessionCompacted,
 } from "../sessions.js";
 import { askQuestion } from "../opencode.js";
-import { markdownToSlack, splitMessage } from "../utils/formatting.js";
+import { formatResponse } from "../utils/formatting.js";
 import type { SlackContext } from "../utils/slack-context.js";
 import type { ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
@@ -76,22 +76,26 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
 
   progress.stop();
 
-  // Format the response
-  const formatted = markdownToSlack(result.text);
-  const chunks = splitMessage(formatted);
+  // Format the response into Slack message payloads (with blocks for tables)
+  const messages = formatResponse(result.text);
 
-  // Update the placeholder with the first chunk
+  // First message updates the placeholder
+  const first = messages[0];
   await client.chat.update({
     channel,
     ts: placeholderTs,
-    text: chunks[0],
+    text: first.text,
+    ...(first.blocks && { blocks: first.blocks }),
   });
 
-  for (let i = 1; i < chunks.length; i++) {
+  // Remaining messages posted as thread replies
+  for (let i = 1; i < messages.length; i++) {
+    const msg = messages[i];
     await client.chat.postMessage({
       channel,
       thread_ts: threadTs,
-      text: chunks[i],
+      text: msg.text,
+      ...(msg.blocks && { blocks: msg.blocks }),
     });
   }
 }

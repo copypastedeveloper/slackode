@@ -10,9 +10,10 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@slack/bolt": "^4.6.0",
     "@opencode-ai/sdk": "^1.2.10",
-    "better-sqlite3": "^12.6.2"
+    "@slack/bolt": "^4.6.0",
+    "better-sqlite3": "^12.6.2",
+    "markdown-to-slack-blocks": "^1.4.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
