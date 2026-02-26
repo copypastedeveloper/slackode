@@ -16,7 +16,7 @@
     "env": "SENTRY_ACCESS_TOKEN",
     "mcp": {
       "type": "local",
-      "command": ["npx", "-y", "@sentry/mcp-server", "stdio"],
+      "command": ["npx", "-y", "@sentry/mcp-server"],
       "envPassthrough": true
     }
   }

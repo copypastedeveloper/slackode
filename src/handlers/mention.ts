@@ -244,8 +244,8 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
       ? await downloadFiles(allFiles, client)
       : undefined;
 
-    // If there was no text and all file downloads failed, show an error
-    if (!question && (!files || files.length === 0)) {
+    // If there was no text, no files, and no thread context, show an error
+    if (!question && (!files || files.length === 0) && !threadContext) {
       await client.chat.update({
         channel: event.channel,
         ts: placeholderTs,
@@ -254,8 +254,11 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
       return;
     }
 
-    // Default question when files are attached without text
-    const finalQuestion = question || "What is in this file?";
+    // Default question: use file-oriented prompt if files exist, otherwise
+    // a generic prompt that lets thread context drive the answer.
+    const finalQuestion = question || (files && files.length > 0
+      ? "What is in this file?"
+      : "Can you help with this?");
 
     const channelAgent = getChannelAgent(event.channel);
     const channelTools = getChannelTools(event.channel);
