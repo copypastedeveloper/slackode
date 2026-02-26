@@ -44,8 +44,11 @@ The bot is strictly **read-only** — it will never suggest code changes, write 
    - `im:write` — send DMs
    - `im:history` — read DM history
    - `users:read` — fetch user profile info (name, title, status)
-   - `channels:read` — fetch channel info (name, topic, purpose)
-   - `channels:history` — read channel thread history (for thread context)
+   - `channels:read` — fetch public channel info (name, topic, purpose)
+   - `channels:history` — read public channel thread history (for thread context)
+   - `groups:read` — fetch private channel info
+   - `groups:history` — read private channel thread history
+   - `files:read` — download file attachments (images, PDFs)
 
 **Enable events:**
 
@@ -327,8 +330,9 @@ src/
 │   ├── mention.ts        # @mention handler
 │   └── dm.ts             # DM handler
 └── utils/
-    ├── formatting.ts     # Markdown -> Slack mrkdwn conversion
+    ├── formatting.ts     # Markdown -> Slack Block Kit conversion (tables, rich text)
     ├── slack-context.ts  # Fetches user/channel info from Slack API
+    ├── slack-files.ts    # Slack file download + base64 data URI conversion
     └── progress.ts       # Throttled Slack message updater
 ```
 
