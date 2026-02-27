@@ -3,7 +3,7 @@ import {
   getChannelTools, setChannelTools, clearChannelTools, listChannelTools,
   getChannelConfig, setChannelConfig, clearChannelConfig,
 } from "../sessions.js";
-import { KNOWN_TOOLS, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
+import { getKnownTools, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
 
 /**
  * Handle config commands like:
@@ -76,14 +76,15 @@ export async function handleConfigCommand(
   const setToolsMatch = subcommand.match(/^set\s+tools?\s+(\S+)$/i);
   if (setToolsMatch) {
     const requested = setToolsMatch[1].split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
-    const invalid = requested.filter((t) => !(t in KNOWN_TOOLS));
+    const knownTools = getKnownTools();
+    const invalid = requested.filter((t) => !(t in knownTools));
     if (invalid.length > 0) {
-      const available = Object.keys(KNOWN_TOOLS).map((k) => `\`${k}\``).join(", ");
+      const available = Object.keys(knownTools).map((k) => `\`${k}\``).join(", ");
       return `Unknown tool${invalid.length > 1 ? "s" : ""}: ${invalid.map((t) => `\`${t}\``).join(", ")}. Available tools: ${available}`;
     }
     const unique = [...new Set(requested)].sort();
     if (unique.length === 0) {
-      const available = Object.keys(KNOWN_TOOLS).map((k) => `\`${k}\``).join(", ");
+      const available = Object.keys(knownTools).map((k) => `\`${k}\``).join(", ");
       return `No valid tools specified. Please provide at least one tool name. Available tools: ${available}`;
     }
     setChannelTools(channelId, channelName, unique);
@@ -120,7 +121,7 @@ export async function handleConfigCommand(
 
   // config available tools
   if (/^available\s+tools?$/i.test(subcommand)) {
-    const lines = Object.entries(KNOWN_TOOLS).map(([name, desc]) => `• \`${name}\` — ${desc}`);
+    const lines = Object.entries(getKnownTools()).map(([name, desc]) => `• \`${name}\` — ${desc}`);
     return `*Available tools:*\n${lines.join("\n")}`;
   }
 

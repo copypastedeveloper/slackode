@@ -6,6 +6,7 @@ import { getSlackContext, fetchThreadContext } from "../utils/slack-context.js";
 import { downloadFiles, type SlackFile } from "../utils/slack-files.js";
 import { handleQuestion } from "./shared.js";
 import { handleConfigCommand } from "./config-commands.js";
+import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
 
 type MentionArgs = SlackEventMiddlewareArgs<"app_mention"> & AllMiddlewareArgs;
 
@@ -34,14 +35,37 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
 
   const userId = event.user ?? "unknown";
 
-  // Check for config commands before doing any Q&A work (skip when files are attached)
+  // Check for config/tool commands before doing any Q&A work (skip when files are attached)
   const slackCtx = await getSlackContext(client, userId, event.channel, "channel");
+  const threadTs0 = event.thread_ts ?? event.ts;
   if (!hasFiles && question) {
+    // Try tool commands first
+    const toolReply = await handleToolCommand(question, event.channel, userId, threadTs0, client);
+    if (toolReply) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: threadTs0,
+        text: toolReply,
+      });
+      return;
+    }
+
+    // Check if this is a reply in an active `tool add` conversation
+    const addReply = advanceToolAdd(event.channel, userId, question);
+    if (addReply) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: threadTs0,
+        text: addReply,
+      });
+      return;
+    }
+
     const configReply = await handleConfigCommand(question, event.channel, slackCtx.channelName, userId);
     if (configReply) {
       await client.chat.postMessage({
         channel: event.channel,
-        thread_ts: event.thread_ts ?? event.ts,
+        thread_ts: threadTs0,
         text: configReply,
       });
       return;

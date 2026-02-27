@@ -5,6 +5,7 @@ import {
   isSessionCompacted, setSessionCompacted,
 } from "../sessions.js";
 import { askQuestion } from "../opencode.js";
+import { isRestarting } from "../opencode-server.js";
 import { formatResponse } from "../utils/formatting.js";
 import { fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
 import type { ConvertedFile } from "../utils/slack-files.js";
@@ -34,6 +35,16 @@ export interface HandleQuestionOpts {
  */
 export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
   const { client, channel, threadTs, placeholderTs, question, slackCtx, agent, tools, threadContext, files } = opts;
+
+  // If the OpenCode server is restarting, return a friendly message
+  if (isRestarting()) {
+    await client.chat.update({
+      channel,
+      ts: placeholderTs,
+      text: "_I'm reconfiguring right now. Please try again in a few seconds._",
+    });
+    return;
+  }
 
   // Attach per-channel custom prompt if configured
   const channelConfig = getChannelConfig(channel);
