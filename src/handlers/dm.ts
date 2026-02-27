@@ -1,9 +1,11 @@
 import type { AllMiddlewareArgs, SlackEventMiddlewareArgs } from "@slack/bolt";
-import { getChannelConfig, setChannelConfig, clearChannelConfig } from "../sessions.js";
-import { MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
+import {
+  getChannelAgent, getChannelTools, resolveAgent,
+} from "../sessions.js";
 import { getSlackContext } from "../utils/slack-context.js";
 import { downloadFiles, type SlackFile } from "../utils/slack-files.js";
 import { handleQuestion } from "./shared.js";
+import { handleConfigCommand } from "./config-commands.js";
 
 type MessageArgs = SlackEventMiddlewareArgs<"message"> & AllMiddlewareArgs;
 
@@ -38,49 +40,16 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
       : event.ts;
 
   // ── config commands (skip when files are attached) ──
-  if (!hasFiles && (question.startsWith("config ") || question === "config")) {
-    const args = question.slice("config".length).trim();
-
-    if (args.startsWith("set ")) {
-      const prompt = args.slice("set ".length).trim();
-      if (!prompt) {
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-          text: "Usage: `config set <instructions>` — provide the custom instructions after `set`." });
-        return;
-      }
-      if (prompt.length > MAX_CUSTOM_PROMPT_LENGTH) {
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-          text: `Custom instructions must be ${MAX_CUSTOM_PROMPT_LENGTH} characters or fewer (yours: ${prompt.length}).` });
-        return;
-      }
-      setChannelConfig(event.channel, prompt, userId);
-      await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-        text: `Custom instructions set for your DMs:\n> ${prompt}` });
+  if (!hasFiles && question) {
+    const configReply = await handleConfigCommand(question, event.channel, "DM", userId);
+    if (configReply) {
+      await client.chat.postMessage({
+        channel: event.channel,
+        thread_ts: threadTs,
+        text: configReply,
+      });
       return;
     }
-
-    if (args === "show") {
-      const config = getChannelConfig(event.channel);
-      if (config) {
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-          text: `Custom instructions for your DMs:\n> ${config.customPrompt}` });
-      } else {
-        await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-          text: "No custom instructions set for your DMs." });
-      }
-      return;
-    }
-
-    if (args === "clear") {
-      clearChannelConfig(event.channel);
-      await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-        text: "Custom instructions cleared for your DMs." });
-      return;
-    }
-
-    await client.chat.postMessage({ channel: event.channel, thread_ts: threadTs,
-      text: "Usage: `config set <instructions>`, `config show`, or `config clear`." });
-    return;
   }
 
   // Post a placeholder
@@ -113,6 +82,10 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
 
     const slackCtx = await getSlackContext(client, userId, event.channel, "dm");
 
+    const channelAgent = getChannelAgent(event.channel);
+    const channelTools = getChannelTools(event.channel);
+    const agent = resolveAgent(channelAgent, channelTools);
+
     await handleQuestion({
       client,
       channel: event.channel,
@@ -120,6 +93,8 @@ export async function handleDm({ event, client, context }: MessageArgs): Promise
       placeholderTs,
       question: finalQuestion,
       slackCtx,
+      agent,
+      tools: channelTools,
       files,
     });
   } catch (error) {
