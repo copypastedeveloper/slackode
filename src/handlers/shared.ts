@@ -6,7 +6,7 @@ import {
 } from "../sessions.js";
 import { askQuestion } from "../opencode.js";
 import { formatResponse } from "../utils/formatting.js";
-import type { SlackContext } from "../utils/slack-context.js";
+import { fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
 import type { ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
 
@@ -43,6 +43,16 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
 
   if (threadContext) {
     slackCtx.threadContext = threadContext;
+  }
+
+  // Resolve any Slack thread links in the question text
+  try {
+    const linked = await fetchLinkedThreads(client, question);
+    if (linked) {
+      slackCtx.linkedThreadContext = linked;
+    }
+  } catch (err) {
+    console.warn("[linked-threads] Failed to fetch linked threads:", err);
   }
 
   const { sessionId, isNew } = await getOrCreateSession(threadTs);

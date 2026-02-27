@@ -73,6 +73,13 @@ export function buildContextPrefix(ctx: SlackContext, isNew: boolean, tools?: st
     if (ctx.customPrompt) {
       parts.push(`Channel instructions: ${ctx.customPrompt}`);
     }
+    if (ctx.linkedThreadContext) {
+      parts.push("");
+      parts.push("The user's message includes a link to another Slack thread:");
+      parts.push("<linked_thread_context>");
+      parts.push(ctx.linkedThreadContext);
+      parts.push("</linked_thread_context>");
+    }
     parts.push("");
     return parts.join("\n");
   }
@@ -154,6 +161,14 @@ export function buildContextPrefix(ctx: SlackContext, isNew: boolean, tools?: st
     lines.push("<thread_context>");
     lines.push(ctx.threadContext);
     lines.push("</thread_context>");
+  }
+
+  if (ctx.linkedThreadContext) {
+    lines.push("");
+    lines.push("The user's message includes a link to another Slack thread. Here is the conversation from that linked thread:");
+    lines.push("<linked_thread_context>");
+    lines.push(ctx.linkedThreadContext);
+    lines.push("</linked_thread_context>");
   }
 
   lines.push(
