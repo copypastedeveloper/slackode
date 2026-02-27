@@ -27,44 +27,17 @@ The bot is strictly **read-only** — it will never suggest code changes, write 
 
 ### 1. Create a Slack App
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** > **From scratch**
-2. Name it (e.g. "Slackode") and select your workspace
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** > **From an app manifest**
+2. Select your workspace
+3. Paste the contents of [`slack-manifest.yaml`](slack-manifest.yaml) and click **Create**
 
-**Enable Socket Mode:**
+This configures all required scopes, events, and settings automatically.
 
-3. Go to **Settings** > **Socket Mode** and enable it
-4. Create an app-level token with the `connections:write` scope — save this as your `SLACK_APP_TOKEN` (starts with `xapp-`)
+**Generate tokens:**
 
-**Set bot scopes:**
-
-5. Go to **Features** > **OAuth & Permissions** > **Scopes** > **Bot Token Scopes** and add:
-   - `app_mentions:read` — receive @mention events
-   - `chat:write` — send messages
-   - `im:read` — receive DM events
-   - `im:write` — send DMs
-   - `im:history` — read DM history
-   - `users:read` — fetch user profile info (name, title, status)
-   - `channels:read` — fetch public channel info (name, topic, purpose)
-   - `channels:history` — read public channel thread history (for thread context)
-   - `groups:read` — fetch private channel info
-   - `groups:history` — read private channel thread history
-   - `files:read` — download file attachments (images, PDFs)
-
-**Enable events:**
-
-6. Go to **Features** > **Event Subscriptions** and enable events
-7. Under **Subscribe to bot events**, add:
-   - `app_mention`
-   - `message.im`
-
-**Install the app:**
-
-8. Go to **Settings** > **Install App** and click **Install to Workspace**
-9. Copy the **Bot User OAuth Token** — this is your `SLACK_BOT_TOKEN` (starts with `xoxb-`)
-
-**Enable DMs:**
-
-10. Go to **Features** > **App Home** and check **Allow users to send Slash commands and messages from the messages tab**
+4. Go to **Settings** > **Basic Information** > **App-Level Tokens**, create a token with the `connections:write` scope — this is your `SLACK_APP_TOKEN` (starts with `xapp-`)
+5. Go to **Settings** > **Install App** and click **Install to Workspace**
+6. Copy the **Bot User OAuth Token** — this is your `SLACK_BOT_TOKEN` (starts with `xoxb-`)
 
 ### 2. Configure your LLM provider
 
