@@ -3,7 +3,7 @@ import {
   type OpencodeClient,
   type Event,
 } from "@opencode-ai/sdk";
-import { TOOL_INSTRUCTIONS } from "./tools.js";
+import { getToolInstructions } from "./tools.js";
 import type { SlackContext } from "./utils/slack-context.js";
 import type { ConvertedFile } from "./utils/slack-files.js";
 
@@ -115,9 +115,10 @@ export function buildContextPrefix(ctx: SlackContext, isNew: boolean, tools?: st
 
   // Add tool-specific instructions when a channel has tools enabled
   if (tools && tools.length > 0) {
+    const toolInstructions = getToolInstructions();
     lines.push("ADDITIONAL TOOLS:");
     for (const tool of tools) {
-      const instruction = TOOL_INSTRUCTIONS[tool];
+      const instruction = toolInstructions[tool];
       if (instruction) {
         lines.push(`- ${instruction}`);
       }

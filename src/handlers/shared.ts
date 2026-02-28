@@ -5,6 +5,7 @@ import {
   isSessionCompacted, setSessionCompacted,
 } from "../sessions.js";
 import { askQuestion } from "../opencode.js";
+import { isRestarting, waitForRestart } from "../opencode-server.js";
 import { formatResponse } from "../utils/formatting.js";
 import { fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
 import type { ConvertedFile } from "../utils/slack-files.js";
@@ -34,6 +35,16 @@ export interface HandleQuestionOpts {
  */
 export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
   const { client, channel, threadTs, placeholderTs, question, slackCtx, agent, tools, threadContext, files } = opts;
+
+  // If the OpenCode server is restarting, return a friendly message
+  if (isRestarting()) {
+    await client.chat.update({
+      channel,
+      ts: placeholderTs,
+      text: "_I'm reconfiguring right now. Please try again in a few seconds._",
+    });
+    return;
+  }
 
   // Attach per-channel custom prompt if configured
   const channelConfig = getChannelConfig(channel);
@@ -67,16 +78,31 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
   // Set up throttled progress updates
   const progress = createProgressUpdater(client, channel, placeholderTs);
 
-  const result = await askQuestion({
+  const askOpts = {
     sessionId,
     question,
     ctx: slackCtx,
-    onProgress: (status) => { progress.update(status); },
+    onProgress: (status: string) => { progress.update(status); },
     isNewSession: needsFullContext,
     agent,
     tools,
     files,
-  });
+  };
+
+  let result;
+  try {
+    result = await askQuestion(askOpts);
+  } catch (err) {
+    // If the server is restarting (tool config change killed it mid-flight),
+    // wait for the restart to finish and retry once.
+    if (isRestarting()) {
+      progress.update("_Reconfiguring... I'll pick back up in a moment._");
+      await waitForRestart();
+      result = await askQuestion(askOpts);
+    } else {
+      throw err;
+    }
+  }
 
   // If compaction occurred during this response, flag the session so the
   // next message re-sends the full behavioral instructions.
