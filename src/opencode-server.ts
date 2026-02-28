@@ -9,6 +9,7 @@ const HEALTH_POLL_MS = 1_000;
 
 let serverProcess: ChildProcess | null = null;
 let restarting = false;
+let restartResolvers: Array<() => void> = [];
 let repoDir: string;
 
 /**
@@ -17,6 +18,17 @@ let repoDir: string;
  */
 export function isRestarting(): boolean {
   return restarting;
+}
+
+/**
+ * Returns a promise that resolves when the current restart completes.
+ * Resolves immediately if not currently restarting.
+ */
+export function waitForRestart(): Promise<void> {
+  if (!restarting) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    restartResolvers.push(resolve);
+  });
 }
 
 /**
@@ -111,5 +123,7 @@ export async function restartServer(): Promise<number> {
     return (Date.now() - start) / 1000;
   } finally {
     restarting = false;
+    for (const resolve of restartResolvers) resolve();
+    restartResolvers = [];
   }
 }
