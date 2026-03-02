@@ -6,14 +6,22 @@ import {
 } from "../sessions.js";
 import { restartServer } from "../opencode-server.js";
 
+/** Would this tool be included in the generated config? */
+function isToolActive(tool: { enabled: number; mcp_type: string }, key: string | undefined): boolean {
+  if (!tool.enabled) return false;
+  // Remote tools require a key; local tools work without one.
+  return tool.mcp_type === "local" || !!key;
+}
+
 // ── Conversational state machine for `tool add` ──
 
 interface AddState {
-  step: "description" | "instruction" | "mcp_type" | "mcp_url" | "mcp_command";
+  step: "description" | "instruction" | "mcp_type" | "mcp_url" | "mcp_command" | "needs_key";
   name: string;
   description?: string;
   instruction?: string;
   mcpType?: string;
+  mcpCommand?: string[];
   expiresAt: number;
 }
 
@@ -92,22 +100,37 @@ export function advanceToolAdd(
       );
     }
     case "mcp_command": {
-      const parts = input.split(/\s+/);
+      state.mcpCommand = input.split(/\s+/);
+      state.step = "needs_key";
+      return "Does this tool require an API key? (`yes` or `no`)";
+    }
+    case "needs_key": {
+      const lower = input.toLowerCase();
+      if (lower !== "yes" && lower !== "no" && lower !== "y" && lower !== "n") {
+        return "Please answer `yes` or `no`.";
+      }
+      const needsKey = lower === "yes" || lower === "y";
       const opts: UpsertToolOpts = {
         name: state.name,
         description: state.description!,
         instruction: state.instruction!,
         mcpType: "local",
-        mcpCommand: parts,
-        mcpEnvPassthrough: true,
-        envVar: `${state.name.toUpperCase().replace(/-/g, "_")}_API_KEY`,
+        mcpCommand: state.mcpCommand!,
+        ...(needsKey && {
+          mcpEnvPassthrough: true,
+          envVar: `${state.name.toUpperCase().replace(/-/g, "_")}_API_KEY`,
+        }),
       };
       upsertTool(opts);
       addStates.delete(key);
-      return (
-        `Tool \`${state.name}\` registered.\n` +
-        `Run \`tool set-key ${state.name} <api-key>\` to configure the API key.`
-      );
+      if (needsKey) {
+        return (
+          `Tool \`${state.name}\` registered.\n` +
+          `Run \`tool set-key ${state.name} <api-key>\` to configure the API key.`
+        );
+      }
+      restartServer();
+      return `Tool \`${state.name}\` registered. _Reconfiguring..._`;
     }
     default:
       addStates.delete(key);
@@ -174,10 +197,10 @@ export async function handleToolCommand(
     const tool = getToolFromDb(name);
     if (!tool) return `Tool \`${name}\` not found.`;
 
-    const wasEnabled = tool.enabled === 1 && !!(getToolKey(tool));
+    const wasActive = isToolActive(tool, getToolKey(tool));
     removeTool(name);
 
-    if (wasEnabled) {
+    if (wasActive) {
       await client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
@@ -223,7 +246,7 @@ export async function handleToolCommand(
 
     setToolEnabled(name, true);
 
-    if (getToolKey({ ...tool, enabled: 1 })) {
+    if (isToolActive({ ...tool, enabled: 1 }, getToolKey(tool))) {
       await client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
@@ -246,7 +269,7 @@ export async function handleToolCommand(
 
     setToolEnabled(name, false);
 
-    if (getToolKey(tool)) {
+    if (isToolActive(tool, getToolKey(tool))) {
       await client.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,

@@ -25,10 +25,13 @@ export function writeOpencodeConfig(repoDir: string): void {
 
   for (const tool of tools) {
     const key = getToolKey(tool);
-    if (!key) {
+
+    // Remote tools require an API key — skip if missing.
+    if (tool.mcp_type === "remote" && !key) {
       console.log(`[config] ${tool.name} skipped (no API key set).`);
       continue;
     }
+
     enabled.push(tool.name);
 
     // Build MCP server entry
@@ -51,7 +54,7 @@ export function writeOpencodeConfig(repoDir: string): void {
         command,
         enabled: true,
       };
-      if (tool.mcp_env_passthrough && tool.env_var) {
+      if (key && tool.mcp_env_passthrough && tool.env_var) {
         entry.environment = { [tool.env_var]: key };
       }
       config.mcp[tool.name] = entry;

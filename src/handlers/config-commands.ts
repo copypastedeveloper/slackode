@@ -72,10 +72,10 @@ export async function handleConfigCommand(
 
   // --- Tool commands ---
 
-  // config set tools <tool1,tool2>
-  const setToolsMatch = subcommand.match(/^set\s+tools?\s+(\S+)$/i);
+  // config set tools <tool1,tool2> (allows spaces around commas)
+  const setToolsMatch = subcommand.match(/^set\s+tools?\s+(.+)$/i);
   if (setToolsMatch) {
-    const requested = setToolsMatch[1].split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+    const requested = setToolsMatch[1].split(/[\s,]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
     const knownTools = getKnownTools();
     const invalid = requested.filter((t) => !(t in knownTools));
     if (invalid.length > 0) {

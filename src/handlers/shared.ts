@@ -2,14 +2,154 @@ import type { WebClient } from "@slack/web-api";
 import {
   getOrCreateSession,
   getChannelConfig,
+  getChannelAgent, getChannelTools, resolveAgent,
   isSessionCompacted, setSessionCompacted,
 } from "../sessions.js";
 import { askQuestion } from "../opencode.js";
 import { isRestarting, waitForRestart } from "../opencode-server.js";
 import { formatResponse } from "../utils/formatting.js";
-import { fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
-import type { ConvertedFile } from "../utils/slack-files.js";
+import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
+import { downloadFiles, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
+import { handleConfigCommand } from "./config-commands.js";
+import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
+
+// ── processIncoming: shared pipeline for DMs and mentions ──
+
+export interface IncomingOpts {
+  text: string;
+  files: SlackFile[];
+  channelId: string;
+  channelType: "dm" | "channel";
+  userId: string;
+  threadTs: string;
+  eventTs: string;
+  isThread: boolean;
+  botUserId?: string;
+  client: WebClient;
+}
+
+/**
+ * Shared incoming-message pipeline used by both DM and mention handlers.
+ * Handles: validation, command routing, placeholder, thread context,
+ * file downloads, agent resolution, and Q&A via handleQuestion.
+ */
+export async function processIncoming(opts: IncomingOpts): Promise<void> {
+  const {
+    text: question, files: eventFiles, channelId, channelType,
+    userId, threadTs, eventTs, isThread, botUserId, client,
+  } = opts;
+
+  const hasFiles = eventFiles.length > 0;
+
+  // Validate: need text, files, or thread context to proceed
+  if (!question && !hasFiles && !isThread) {
+    if (channelType === "channel") {
+      await client.chat.postMessage({
+        channel: channelId,
+        thread_ts: threadTs,
+        text: "It looks like you mentioned me but didn't ask a question. How can I help?",
+      });
+    }
+    return;
+  }
+
+  // ── Command routing (skip when files are attached) ──
+  const channelName = channelType === "dm" ? "DM" : undefined;
+  const slackCtx = await getSlackContext(client, userId, channelId, channelType);
+
+  if (!hasFiles && question) {
+    const toolReply = await handleToolCommand(question, channelId, userId, threadTs, client);
+    if (toolReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: toolReply });
+      return;
+    }
+
+    const addReply = advanceToolAdd(channelId, userId, question);
+    if (addReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: addReply });
+      return;
+    }
+
+    const configReply = await handleConfigCommand(
+      question, channelId, channelName ?? slackCtx.channelName, userId,
+    );
+    if (configReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: configReply });
+      return;
+    }
+  }
+
+  // ── Post placeholder ──
+  const placeholder = await client.chat.postMessage({
+    channel: channelId,
+    thread_ts: threadTs,
+    text: "_Looking into this..._",
+  });
+  const placeholderTs = placeholder.ts!;
+
+  try {
+    // ── Thread context + thread files ──
+    let threadContext: string | undefined;
+    let allFiles = [...eventFiles];
+    if (isThread) {
+      const ctx = await fetchThreadContext(
+        client, channelId, threadTs, eventTs, botUserId,
+      );
+      threadContext = ctx.text || undefined;
+      if (ctx.files.length > 0) {
+        allFiles = [...allFiles, ...ctx.files];
+      }
+    }
+
+    // ── Download files ──
+    const files = allFiles.length > 0
+      ? await downloadFiles(allFiles, client)
+      : undefined;
+
+    // If there was no text, no files, and no thread context, show an error
+    if (!question && (!files || files.length === 0) && !threadContext) {
+      await client.chat.update({
+        channel: channelId,
+        ts: placeholderTs,
+        text: "_I couldn't process the attached file(s). Please try again with a supported image (PNG, JPEG, GIF, WebP) or PDF under 10 MB._",
+      });
+      return;
+    }
+
+    // Default question: use file-oriented prompt if files exist, otherwise
+    // a generic prompt that lets thread context drive the answer.
+    const finalQuestion = question || (files && files.length > 0
+      ? "What is in this file?"
+      : "Can you help with this?");
+
+    const channelAgent = getChannelAgent(channelId);
+    const channelTools = getChannelTools(channelId);
+    const agent = resolveAgent(channelAgent, channelTools);
+
+    await handleQuestion({
+      client,
+      channel: channelId,
+      threadTs,
+      placeholderTs,
+      question: finalQuestion,
+      slackCtx,
+      agent,
+      tools: channelTools,
+      threadContext,
+      files,
+    });
+  } catch (error) {
+    console.error(`Error handling ${channelType}:`, error);
+    await client.chat.update({
+      channel: channelId,
+      ts: placeholderTs,
+      text: "_Sorry, I ran into an issue processing your question. Please try again or rephrase._",
+    });
+  }
+}
+
+// ── handleQuestion: low-level Q&A pipeline ──
 
 export interface HandleQuestionOpts {
   client: WebClient;
