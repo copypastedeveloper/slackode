@@ -7,6 +7,8 @@ services:
       - opencode-data:/home/appuser/.local/share/opencode
     environment:
       - SESSIONS_DB_PATH=/home/appuser/.local/share/opencode/sessions.db
+      - REPO_DIR=/app/repo
+      - TOOLS_SEED_PATH=/app/tools.json
     read_only: true
     tmpfs:
       - /tmp:size=100M,exec,uid=1001,gid=1001

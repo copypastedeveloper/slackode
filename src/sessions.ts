@@ -1,6 +1,8 @@
 import Database from "better-sqlite3";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { createSession } from "./opencode.js";
+import { encrypt, decrypt, type EncryptedValue } from "./crypto.js";
 
 const DB_PATH = process.env.SESSIONS_DB_PATH || path.join(process.cwd(), "sessions.db");
 
@@ -45,6 +47,25 @@ function getDb(): Database.Database {
         channel_id TEXT PRIMARY KEY,
         custom_prompt TEXT NOT NULL,
         configured_by TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tools (
+        name TEXT PRIMARY KEY,
+        description TEXT NOT NULL,
+        instruction TEXT NOT NULL,
+        mcp_type TEXT NOT NULL,
+        mcp_url TEXT,
+        mcp_header_auth TEXT,
+        mcp_command TEXT,
+        mcp_env_passthrough INTEGER NOT NULL DEFAULT 0,
+        env_var TEXT,
+        encrypted_key TEXT,
+        key_iv TEXT,
+        key_tag TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
@@ -217,4 +238,178 @@ export function clearChannelConfig(channelId: string): void {
   getDb()
     .prepare("DELETE FROM channel_config WHERE channel_id = ?")
     .run(channelId);
+}
+
+// ── Tool management ──
+
+export interface ToolRow {
+  name: string;
+  description: string;
+  instruction: string;
+  mcp_type: string;
+  mcp_url: string | null;
+  mcp_header_auth: string | null;
+  mcp_command: string | null;
+  mcp_env_passthrough: number;
+  env_var: string | null;
+  encrypted_key: string | null;
+  key_iv: string | null;
+  key_tag: string | null;
+  enabled: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export function getToolFromDb(name: string): ToolRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM tools WHERE name = ?")
+    .get(name) as ToolRow | undefined;
+}
+
+export function getAllTools(): ToolRow[] {
+  return getDb()
+    .prepare("SELECT * FROM tools ORDER BY name")
+    .all() as ToolRow[];
+}
+
+export function getEnabledTools(): ToolRow[] {
+  return getDb()
+    .prepare("SELECT * FROM tools WHERE enabled = 1 ORDER BY name")
+    .all() as ToolRow[];
+}
+
+export interface UpsertToolOpts {
+  name: string;
+  description: string;
+  instruction: string;
+  mcpType: string;
+  mcpUrl?: string;
+  mcpHeaderAuth?: string;
+  mcpCommand?: string[];
+  mcpEnvPassthrough?: boolean;
+  envVar?: string;
+}
+
+export function upsertTool(opts: UpsertToolOpts): void {
+  getDb()
+    .prepare(`
+      INSERT INTO tools (name, description, instruction, mcp_type, mcp_url, mcp_header_auth, mcp_command, mcp_env_passthrough, env_var, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+      ON CONFLICT(name) DO UPDATE SET
+        description = excluded.description,
+        instruction = excluded.instruction,
+        mcp_type = excluded.mcp_type,
+        mcp_url = excluded.mcp_url,
+        mcp_header_auth = excluded.mcp_header_auth,
+        mcp_command = excluded.mcp_command,
+        mcp_env_passthrough = excluded.mcp_env_passthrough,
+        env_var = excluded.env_var,
+        updated_at = unixepoch()
+    `)
+    .run(
+      opts.name,
+      opts.description,
+      opts.instruction,
+      opts.mcpType,
+      opts.mcpUrl ?? null,
+      opts.mcpHeaderAuth ?? null,
+      opts.mcpCommand ? JSON.stringify(opts.mcpCommand) : null,
+      opts.mcpEnvPassthrough ? 1 : 0,
+      opts.envVar ?? null,
+    );
+}
+
+export function removeTool(name: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM tools WHERE name = ?")
+    .run(name);
+  return result.changes > 0;
+}
+
+export function setToolKey(name: string, plainKey: string): void {
+  const enc: EncryptedValue = encrypt(plainKey);
+  getDb()
+    .prepare(
+      "UPDATE tools SET encrypted_key = ?, key_iv = ?, key_tag = ?, updated_at = unixepoch() WHERE name = ?"
+    )
+    .run(enc.ciphertext, enc.iv, enc.tag, name);
+}
+
+export function getToolKey(tool: ToolRow): string | undefined {
+  // 1. Encrypted key in DB
+  if (tool.encrypted_key) {
+    return decrypt(tool.encrypted_key, tool.key_iv ?? "", tool.key_tag ?? "");
+  }
+  // 2. Fallback to env var
+  if (tool.env_var && process.env[tool.env_var]) {
+    return process.env[tool.env_var];
+  }
+  return undefined;
+}
+
+export function setToolEnabled(name: string, enabled: boolean): void {
+  getDb()
+    .prepare("UPDATE tools SET enabled = ?, updated_at = unixepoch() WHERE name = ?")
+    .run(enabled ? 1 : 0, name);
+}
+
+/**
+ * Seed tools from a tools.json file when the tools table is empty (first boot).
+ * Does nothing if tools already exist in the DB.
+ */
+export function seedToolsFromFile(filePath: string): void {
+  const existing = getDb()
+    .prepare("SELECT COUNT(*) as count FROM tools")
+    .get() as { count: number };
+
+  if (existing.count > 0) {
+    console.log("[seed] Tools table already has entries, skipping seed.");
+    return;
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf-8");
+  } catch {
+    console.log(`[seed] No seed file at ${filePath}, skipping.`);
+    return;
+  }
+
+  const toolDefs: Record<string, {
+    description: string;
+    instruction: string;
+    env: string;
+    mcp: {
+      type: string;
+      url?: string;
+      headerAuth?: string;
+      command?: string[];
+      envPassthrough?: boolean;
+      oauth?: boolean;
+    };
+  }> = JSON.parse(raw);
+
+  const insert = getDb().prepare(`
+    INSERT INTO tools (name, description, instruction, mcp_type, mcp_url, mcp_header_auth, mcp_command, mcp_env_passthrough, env_var)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const seedMany = getDb().transaction(() => {
+    for (const [name, def] of Object.entries(toolDefs)) {
+      insert.run(
+        name,
+        def.description,
+        def.instruction,
+        def.mcp.type,
+        def.mcp.url ?? null,
+        def.mcp.headerAuth ?? null,
+        def.mcp.command ? JSON.stringify(def.mcp.command) : null,
+        def.mcp.envPassthrough ? 1 : 0,
+        def.env,
+      );
+      console.log(`[seed] Tool '${name}' seeded from ${filePath}`);
+    }
+  });
+
+  seedMany();
 }
