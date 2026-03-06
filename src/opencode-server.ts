@@ -58,6 +58,14 @@ export async function startServer(): Promise<void> {
   serverProcess.on("exit", (code, signal) => {
     console.log(`[server] OpenCode exited (code=${code}, signal=${signal})`);
     serverProcess = null;
+
+    // Auto-restart if the server crashed outside of a managed restart/stop.
+    if (!restarting) {
+      console.warn("[server] Unexpected exit — restarting automatically...");
+      startServer().catch((err) => {
+        console.error("[server] Auto-restart failed:", err);
+      });
+    }
   });
 
   // Poll health endpoint until ready

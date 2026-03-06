@@ -282,6 +282,7 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   let done = false;
   let answerCaptured = false;
   let compacted = false;
+  let assistantMessageId: string | undefined;
 
   const TIMEOUT_MS = 10 * 60 * 1000; // 10 min — agent may chain multiple tool calls
   const timeout = setTimeout(() => {
@@ -313,7 +314,13 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
           continue;
         }
 
-        if (part.type === "text") {
+        if (part.type === "step-start") {
+          // Capture the assistant's messageID so we ignore user-message text parts
+          // (which contain the instructions prefix).
+          assistantMessageId = (part as { messageID?: string }).messageID;
+        } else if (part.type === "text") {
+          // Skip text parts from non-assistant messages (e.g. the user prompt)
+          if (assistantMessageId && (part as { messageID?: string }).messageID !== assistantMessageId) continue;
           latestText = part.text ?? "";
           if (onProgress && latestText) {
             onProgress(latestText);

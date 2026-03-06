@@ -140,7 +140,13 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
       files,
     });
   } catch (error) {
-    console.error(`Error handling ${channelType}:`, error);
+    const err = error instanceof Error ? error : new Error(String(error));
+    console.error(`[${channelType}] Error:`, err.message);
+    if (err.stack) console.error(err.stack);
+    if ("cause" in err && err.cause) console.error("[cause]", err.cause);
+    // Log response body if it's an HTTP/SDK error
+    const resp = (error as { response?: { status?: number; data?: unknown } }).response;
+    if (resp) console.error("[response]", resp.status, JSON.stringify(resp.data));
     await client.chat.update({
       channel: channelId,
       ts: placeholderTs,
