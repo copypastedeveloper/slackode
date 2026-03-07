@@ -319,8 +319,10 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
           // (which contain the instructions prefix).
           assistantMessageId = (part as { messageID?: string }).messageID;
         } else if (part.type === "text") {
-          // Skip text parts from non-assistant messages (e.g. the user prompt)
-          if (assistantMessageId && (part as { messageID?: string }).messageID !== assistantMessageId) continue;
+          // Skip text parts until we've seen a step-start (assistant response).
+          // This filters out the user message which contains the instructions prefix.
+          if (!assistantMessageId) continue;
+          if ((part as { messageID?: string }).messageID !== assistantMessageId) continue;
           latestText = part.text ?? "";
           if (onProgress && latestText) {
             onProgress(latestText);
