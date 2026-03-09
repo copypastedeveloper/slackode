@@ -84,12 +84,14 @@ export function advanceToolAdd(
       return "MCP command? (space-separated, e.g. `npx -y @sentry/mcp-server`)";
     }
     case "mcp_url": {
+      // Slack auto-links URLs with angle brackets — strip them
+      const url = input.replace(/^<|>$/g, "");
       const opts: UpsertToolOpts = {
         name: state.name,
         description: state.description!,
         instruction: state.instruction!,
         mcpType: "remote",
-        mcpUrl: input,
+        mcpUrl: url,
         mcpHeaderAuth: "Bearer",
       };
       upsertTool(opts);
