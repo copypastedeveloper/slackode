@@ -2,6 +2,8 @@ import {
   getChannelAgent, setChannelAgent, clearChannelAgent, listChannelAgents,
   getChannelTools, setChannelTools, clearChannelTools, listChannelTools,
   getChannelConfig, setChannelConfig, clearChannelConfig,
+  getChannelRepo, setChannelRepo, clearChannelRepo, listChannelRepos,
+  getRepo, getDefaultRepo, getAllRepos,
 } from "../sessions.js";
 import { getKnownTools, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
 
@@ -153,6 +155,63 @@ export async function handleConfigCommand(
     return `Custom instructions cleared.`;
   }
 
+  // --- Repo commands ---
+
+  // config set repo <name>
+  const setRepoMatch = subcommand.match(/^set\s+repo\s+(\S+)$/i);
+  if (setRepoMatch) {
+    const repoName = setRepoMatch[1];
+    const repo = getRepo(repoName);
+    if (!repo) {
+      const available = getAllRepos().map((r) => `\`${r.name}\``).join(", ");
+      return `Repo \`${repoName}\` not found.${available ? ` Available repos: ${available}` : " No repos registered yet. Use `repo add` to register one."}`;
+    }
+    setChannelRepo(channelId, channelName, repoName);
+    return `Repo set to \`${repoName}\`. Questions here will now focus on the ${repoName} codebase.`;
+  }
+
+  // config get repo
+  if (/^get\s+repo$/i.test(subcommand)) {
+    const repoName = getChannelRepo(channelId);
+    if (repoName) {
+      return `Using repo \`${repoName}\`.`;
+    }
+    const defaultRepo = getDefaultRepo();
+    return `No repo configured — using the default${defaultRepo ? ` (\`${defaultRepo.name}\`)` : ""}.`;
+  }
+
+  // config clear repo
+  if (/^clear\s+repo$/i.test(subcommand)) {
+    const removed = clearChannelRepo(channelId);
+    if (removed) {
+      return `Repo configuration cleared. Using the default repo.`;
+    }
+    return `No repo was configured.`;
+  }
+
+  // config list repos
+  if (/^list\s+repos?$/i.test(subcommand)) {
+    const rows = listChannelRepos();
+    if (rows.length === 0) {
+      return "No channel-specific repos configured. All channels are using the default repo.";
+    }
+    const lines = rows.map((r) => `• #${r.channel_name} → \`${r.repo_name}\``);
+    return `*Channel repo mappings:*\n${lines.join("\n")}`;
+  }
+
+  // config available repos
+  if (/^available\s+repos?$/i.test(subcommand)) {
+    const repos = getAllRepos();
+    if (repos.length === 0) {
+      return "No repos registered. Use `repo add <name> <url>` to add one.";
+    }
+    const lines = repos.map((r) => {
+      const badges = [r.is_default ? "default" : "", r.enabled ? "enabled" : "disabled"].filter(Boolean).join(", ");
+      return `• \`${r.name}\` — ${r.url} [${badges}]`;
+    });
+    return `*Available repos:*\n${lines.join("\n")}`;
+  }
+
   return [
     "Unrecognized config command. Available config commands:",
     "• `config set agent <name>`",
@@ -167,5 +226,10 @@ export async function handleConfigCommand(
     "• `config set prompt <instructions>`",
     "• `config get prompt` / `config show prompt`",
     "• `config clear prompt`",
+    "• `config set repo <name>`",
+    "• `config get repo`",
+    "• `config clear repo`",
+    "• `config list repos`",
+    "• `config available repos`",
   ].join("\n");
 }

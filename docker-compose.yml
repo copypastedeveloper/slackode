@@ -4,6 +4,7 @@ services:
     env_file: .env
     volumes:
       - repo-cache:/app/repo
+      - repos-cache:/app/repos
       - opencode-data:/home/appuser/.local/share/opencode
     environment:
       - SESSIONS_DB_PATH=/home/appuser/.local/share/opencode/sessions.db
@@ -20,4 +21,5 @@ services:
 
 volumes:
   repo-cache:
+  repos-cache:
   opencode-data:

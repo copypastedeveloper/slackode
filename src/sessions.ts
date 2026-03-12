@@ -69,6 +69,25 @@ function getDb(): Database.Database {
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS repos (
+        name TEXT PRIMARY KEY,
+        url TEXT NOT NULL UNIQUE,
+        dir TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS channel_repos (
+        channel_id TEXT PRIMARY KEY,
+        channel_name TEXT NOT NULL,
+        repo_name TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
   }
   return db;
 }
@@ -351,6 +370,115 @@ export function setToolEnabled(name: string, enabled: boolean): void {
   getDb()
     .prepare("UPDATE tools SET enabled = ?, updated_at = unixepoch() WHERE name = ?")
     .run(enabled ? 1 : 0, name);
+}
+
+// ── Repo management ──
+
+export interface RepoRow {
+  name: string;
+  url: string;
+  dir: string;
+  is_default: number;
+  enabled: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export function getRepo(name: string): RepoRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM repos WHERE name = ?")
+    .get(name) as RepoRow | undefined;
+}
+
+export function getAllRepos(): RepoRow[] {
+  return getDb()
+    .prepare("SELECT * FROM repos ORDER BY name")
+    .all() as RepoRow[];
+}
+
+export function getEnabledRepos(): RepoRow[] {
+  return getDb()
+    .prepare("SELECT * FROM repos WHERE enabled = 1 ORDER BY name")
+    .all() as RepoRow[];
+}
+
+export function getDefaultRepo(): RepoRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM repos WHERE is_default = 1 LIMIT 1")
+    .get() as RepoRow | undefined;
+}
+
+export function upsertRepo(name: string, url: string, dir: string, isDefault: boolean): void {
+  getDb()
+    .prepare(`
+      INSERT INTO repos (name, url, dir, is_default, updated_at)
+      VALUES (?, ?, ?, ?, unixepoch())
+      ON CONFLICT(name) DO UPDATE SET
+        url = excluded.url,
+        dir = excluded.dir,
+        is_default = excluded.is_default,
+        updated_at = unixepoch()
+    `)
+    .run(name, url, dir, isDefault ? 1 : 0);
+}
+
+export function removeRepo(name: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM repos WHERE name = ?")
+    .run(name);
+  // Also remove any channel mappings pointing to this repo
+  getDb()
+    .prepare("DELETE FROM channel_repos WHERE repo_name = ?")
+    .run(name);
+  return result.changes > 0;
+}
+
+export function setDefaultRepo(name: string): void {
+  const db = getDb();
+  db.prepare("UPDATE repos SET is_default = 0 WHERE is_default = 1").run();
+  db.prepare("UPDATE repos SET is_default = 1, updated_at = unixepoch() WHERE name = ?").run(name);
+}
+
+export function setRepoEnabled(name: string, enabled: boolean): void {
+  getDb()
+    .prepare("UPDATE repos SET enabled = ?, updated_at = unixepoch() WHERE name = ?")
+    .run(enabled ? 1 : 0, name);
+}
+
+// ── Channel-to-repo mapping ──
+
+export function getChannelRepo(channelId: string): string | undefined {
+  const row = getDb()
+    .prepare("SELECT repo_name FROM channel_repos WHERE channel_id = ?")
+    .get(channelId) as { repo_name: string } | undefined;
+  return row?.repo_name;
+}
+
+export function setChannelRepo(channelId: string, channelName: string, repoName: string): void {
+  getDb()
+    .prepare(
+      "INSERT OR REPLACE INTO channel_repos (channel_id, channel_name, repo_name, updated_at) VALUES (?, ?, ?, unixepoch())"
+    )
+    .run(channelId, channelName, repoName);
+}
+
+export function clearChannelRepo(channelId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM channel_repos WHERE channel_id = ?")
+    .run(channelId);
+  return result.changes > 0;
+}
+
+export interface ChannelRepoRow {
+  channel_id: string;
+  channel_name: string;
+  repo_name: string;
+}
+
+export function listChannelRepos(): ChannelRepoRow[] {
+  return getDb()
+    .prepare("SELECT channel_id, channel_name, repo_name FROM channel_repos ORDER BY channel_name")
+    .all() as ChannelRepoRow[];
 }
 
 /**

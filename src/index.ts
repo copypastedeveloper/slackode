@@ -1,10 +1,10 @@
 import bolt from "@slack/bolt";
 const { App } = bolt;
 import { initOpencode } from "./opencode.js";
-import { generateContext } from "./context-gen.js";
 import { closeDb, seedToolsFromFile } from "./sessions.js";
 import { writeOpencodeConfig } from "./opencode-config.js";
 import { setRepoDir, startServer, stopServer } from "./opencode-server.js";
+import { initRepos, generateContextForAllRepos } from "./repo-manager.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 
@@ -34,11 +34,11 @@ app.event("app_mention", handleMention);
 app.event("message", handleDm);
 
 /**
- * Run context generation, logging errors but never crashing the bot.
+ * Run context generation for all repos, logging errors but never crashing the bot.
  */
 async function runContextGeneration(): Promise<void> {
   try {
-    await generateContext();
+    await generateContextForAllRepos();
   } catch (error) {
     console.error("[context-gen] Failed:", error);
   }
@@ -59,7 +59,10 @@ async function start(): Promise<void> {
   // 4. Initialize OpenCode SDK client
   initOpencode(OPENCODE_URL);
 
-  // 5. Start Slack bot
+  // 5. Initialize repo manager (seeds default repo from env if needed)
+  await initRepos();
+
+  // 6. Start Slack bot
   await app.start();
   console.log(`Slack bot is running (OpenCode server: ${OPENCODE_URL})`);
 

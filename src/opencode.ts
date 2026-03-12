@@ -4,6 +4,7 @@ import {
   type Event,
 } from "@opencode-ai/sdk";
 import { getToolInstructions } from "./tools.js";
+import { readRepoContextFiles } from "./context-gen.js";
 import type { SlackContext } from "./utils/slack-context.js";
 import type { ConvertedFile } from "./utils/slack-files.js";
 
@@ -56,7 +57,20 @@ export async function createSession(title: string): Promise<string> {
  * For new sessions (isNew=true), includes full behavioral instructions + context.
  * For follow-ups, includes a short reminder + context.
  */
-export function buildContextPrefix(ctx: SlackContext, isNew: boolean, tools?: string[]): string {
+export interface RepoInfo {
+  name: string;
+  dir: string;
+  isDefault: boolean;
+  /** Directories of all other available repos, keyed by name. */
+  otherRepos?: Array<{ name: string; dir: string }>;
+}
+
+export function buildContextPrefix(
+  ctx: SlackContext,
+  isNew: boolean,
+  tools?: string[],
+  repo?: RepoInfo,
+): string {
   if (!isNew) {
     // Short reminder on follow-ups — the full instructions were in the first message
     const roleLine = ctx.userTitle ? ` (${ctx.userTitle})` : "";
@@ -91,7 +105,7 @@ export function buildContextPrefix(ctx: SlackContext, isNew: boolean, tools?: st
   // Rules files (.opencode/rules/) provide background context about the repo,
   // but the model may not follow behavioral constraints in rules reliably.
   // Putting them here in the user message ensures they take precedence.
-  const repoName = process.env.TARGET_REPO || "the target repository";
+  const repoName = repo?.name || process.env.TARGET_REPO || "the target repository";
   const hasTools = tools && tools.length > 0;
   const identity = hasTools
     ? `You are a Q&A assistant for the ${repoName} codebase, with additional capabilities via your tools.`
@@ -143,8 +157,40 @@ export function buildContextPrefix(ctx: SlackContext, isNew: boolean, tools?: st
     "Tailor your response to the person's role. For non-technical roles " +
     "(e.g. product managers, designers, support), favor high-level explanations. " +
     "For engineering roles, include file paths, code references, and technical detail.",
+  );
+
+  // Multi-repo awareness: tell the agent where this repo lives and what other repos are available
+  if (repo) {
+    lines.push("");
+    lines.push(`REPOSITORY: The ${repoName} codebase is located at \`${repo.dir}\`.`);
+    if (repo.otherRepos && repo.otherRepos.length > 0) {
+      lines.push("Other repositories are also available if the user asks about them:");
+      for (const other of repo.otherRepos) {
+        lines.push(`- \`${other.name}\` at \`${other.dir}\``);
+      }
+    }
+  }
+
+  lines.push(
     "</instructions>",
     "",
+  );
+
+  // If this repo is not the default (i.e. it's an additional repo whose CWD differs
+  // from the OpenCode server's CWD), inject its context files directly into the prompt
+  // so the agent has the repo overview, directory map, etc.
+  if (repo && !repo.isDefault) {
+    const repoContext = readRepoContextFiles(repo.dir);
+    if (repoContext && !repoContext.includes("(file not found)")) {
+      lines.push("<repo_context>");
+      lines.push(`Reference documentation for the ${repoName} repository:`);
+      lines.push(repoContext);
+      lines.push("</repo_context>");
+      lines.push("");
+    }
+  }
+
+  lines.push(
     "<context>",
     `User: ${ctx.userName}`,
   );
@@ -221,6 +267,7 @@ export interface AskQuestionOpts {
   agent?: string;
   tools?: string[];
   files?: ConvertedFile[];
+  repo?: RepoInfo;
 }
 
 /**
@@ -237,11 +284,11 @@ function getToolStateType(part: { state?: unknown }): string | undefined {
  * Calls onProgress with status updates as OpenCode works.
  */
 export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
-  const { sessionId, question, ctx, onProgress, isNewSession, agent, tools, files } = opts;
+  const { sessionId, question, ctx, onProgress, isNewSession, agent, tools, files, repo } = opts;
 
   // Prepend context — full block for new sessions, short line for follow-ups
   const contextPrefix = ctx
-    ? buildContextPrefix(ctx, isNewSession ?? false, tools)
+    ? buildContextPrefix(ctx, isNewSession ?? false, tools, repo)
     : "";
 
   // Wrap user question in delimiters to mitigate prompt injection
