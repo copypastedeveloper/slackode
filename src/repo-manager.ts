@@ -73,7 +73,7 @@ function cleanRepoAgents(dir: string): void {
   const dirsToRemove = [
     ".opencode/agents",
     ...(isDefault ? [] : [".opencode/plugin", ".opencode/plugins"]),
-    ".claude/skills", ".claude", ".agents",
+    ".claude", ".agents",
   ];
   const filesToRemove = [
     ".opencode/opencode.json", ".opencode/.opencode",
@@ -99,12 +99,15 @@ function ensureRulesDir(dir: string): void {
   // Copy base rules from /app/.opencode/rules/ if they exist
   const baseRulesDir = "/app/.opencode/rules";
   if (existsSync(baseRulesDir)) {
-    try {
-      execFileSync("cp", ["-n", ...getBaseRuleFiles(baseRulesDir), rulesDir], {
-        encoding: "utf-8",
-      });
-    } catch {
-      // Non-fatal — base rules may not exist in dev environments
+    const files = getBaseRuleFiles(baseRulesDir);
+    if (files.length > 0) {
+      try {
+        execFileSync("cp", ["-n", ...files, rulesDir], {
+          encoding: "utf-8",
+        });
+      } catch {
+        // Non-fatal — base rules may not exist in dev environments
+      }
     }
   }
 }
@@ -153,7 +156,6 @@ export async function initRepos(): Promise<void> {
     }
     ensureRulesDir(repo.dir);
   }
-
 }
 
 /**

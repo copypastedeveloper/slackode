@@ -430,20 +430,27 @@ export function upsertRepo(name: string, url: string, dir: string, isDefault: bo
 }
 
 export function removeRepo(name: string): boolean {
-  const result = getDb()
-    .prepare("DELETE FROM repos WHERE name = ?")
-    .run(name);
-  // Also remove any channel mappings pointing to this repo
-  getDb()
-    .prepare("DELETE FROM channel_repos WHERE repo_name = ?")
-    .run(name);
-  return result.changes > 0;
+  const database = getDb();
+  const txn = database.transaction(() => {
+    const result = database
+      .prepare("DELETE FROM repos WHERE name = ?")
+      .run(name);
+    // Also remove any channel mappings pointing to this repo
+    database
+      .prepare("DELETE FROM channel_repos WHERE repo_name = ?")
+      .run(name);
+    return result.changes > 0;
+  });
+  return txn();
 }
 
 export function setDefaultRepo(name: string): void {
-  const db = getDb();
-  db.prepare("UPDATE repos SET is_default = 0 WHERE is_default = 1").run();
-  db.prepare("UPDATE repos SET is_default = 1, updated_at = unixepoch() WHERE name = ?").run(name);
+  const database = getDb();
+  const txn = database.transaction(() => {
+    database.prepare("UPDATE repos SET is_default = 0 WHERE is_default = 1").run();
+    database.prepare("UPDATE repos SET is_default = 1, updated_at = unixepoch() WHERE name = ?").run(name);
+  });
+  txn();
 }
 
 export function setRepoEnabled(name: string, enabled: boolean): void {

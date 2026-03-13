@@ -1,4 +1,5 @@
 import type { WebClient } from "@slack/web-api";
+import { existsSync, rmSync } from "node:fs";
 import {
   getRepo, getAllRepos, getDefaultRepo, removeRepo as dbRemoveRepo,
   setDefaultRepo as dbSetDefaultRepo,
@@ -82,7 +83,16 @@ export async function handleRepoCommand(
     if (repo.is_default) {
       return `Cannot remove the default repo. Set a different default first with \`repo set-default <name>\`.`;
     }
+    const repoDir = repo.dir;
     dbRemoveRepo(name);
+    // Clean up the cloned directory on disk
+    if (existsSync(repoDir)) {
+      try {
+        rmSync(repoDir, { recursive: true, force: true });
+      } catch (err) {
+        console.warn(`[repo-commands] Failed to remove directory ${repoDir}:`, err);
+      }
+    }
     return `Repo \`${name}\` removed. Channels that were using it will fall back to the default repo.`;
   }
 
