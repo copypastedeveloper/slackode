@@ -224,7 +224,7 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     console.warn("[linked-threads] Failed to fetch linked threads:", err);
   }
 
-  const { sessionId, isNew } = await getOrCreateSession(threadTs);
+  const { sessionId, isNew } = await getOrCreateSession(threadTs, channel);
 
   // If a previous response triggered compaction, re-send full instructions
   // so the agent recovers its behavioral constraints, then clear the flag.

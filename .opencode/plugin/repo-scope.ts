@@ -1,46 +1,106 @@
 import { readFileSync } from "node:fs";
 import { resolve, normalize } from "node:path";
+import Database from "better-sqlite3";
 
 /**
- * OpenCode plugin that constrains file access to allowed repository directories.
+ * OpenCode plugin that constrains file access on a per-session basis.
  *
- * Reads the list of allowed directories from /app/repo/.opencode/allowed-repos.json
- * (written by the bot process whenever repos change). Intercepts tool calls that
- * reference file paths (read, grep, glob, list, bash) and blocks access to paths
- * outside the allowed set.
+ * When a tool call comes in, the plugin:
+ * 1. Looks up the session ID → channel ID (via the sessions table)
+ * 2. Looks up the channel → repo name (via the channel_repos table)
+ * 3. Looks up the repo → directory path (via the repos table)
+ * 4. Blocks file access outside that repo's directory
  *
- * This provides a structural enforcement layer on top of prompt-based repo scoping.
+ * If no channel-specific repo is configured, falls back to the default repo.
+ * If no repos are configured at all, fails open (allows everything).
  */
 
-const ALLOWED_REPOS_FILE = process.env.ALLOWED_REPOS_FILE || "/app/repo/.opencode/allowed-repos.json";
+const DB_PATH = process.env.SESSIONS_DB_PATH || "/home/appuser/.local/share/opencode/sessions.db";
 
-// Also allow access to /tmp (for scratch work) and the .opencode dir itself
+// Also allow access to /tmp (for scratch work) and the .opencode dir
 const ALWAYS_ALLOWED = ["/tmp", "/app/repo/.opencode"];
 
-// Patterns in bash commands that indicate file system access with a path argument
-const BASH_PATH_COMMANDS = /\b(cat|head|tail|less|more|wc|file|stat|ls|tree|find|grep|rg|awk|sed)\b/;
+// Cache resolved session→dirs mappings (TTL: 30s)
+const sessionCache = new Map<string, { dirs: string[]; ts: number }>();
+const CACHE_TTL_MS = 30_000;
+
+let db: Database.Database | null = null;
+
+function getDb(): Database.Database | null {
+  if (db) return db;
+  try {
+    db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+    return db;
+  } catch {
+    // DB not available yet (server starting up) — fail open
+    return null;
+  }
+}
 
 /**
- * Load allowed repo directories from the JSON file.
- * Returns a list of absolute directory paths.
- * Cached for 60s to avoid reading disk on every tool call.
+ * Resolve the allowed directories for a given OpenCode session ID.
+ * Returns the specific repo dir for the session's channel, plus the default repo.
  */
-let cachedAllowed: string[] | null = null;
-let cacheTime = 0;
-const CACHE_TTL_MS = 60_000;
-
-function getAllowedDirs(): string[] {
-  const now = Date.now();
-  if (cachedAllowed && now - cacheTime < CACHE_TTL_MS) {
-    return cachedAllowed;
+function getAllowedDirsForSession(sessionId: string): string[] {
+  // Check cache
+  const cached = sessionCache.get(sessionId);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return cached.dirs;
   }
+
+  const database = getDb();
+  if (!database) return []; // fail open
+
   try {
-    const data = JSON.parse(readFileSync(ALLOWED_REPOS_FILE, "utf-8"));
-    cachedAllowed = (data.dirs as string[]).map((d) => normalize(resolve(d)));
-    cacheTime = now;
-    return cachedAllowed;
+    // Step 1: session_id → channel_id
+    const session = database
+      .prepare("SELECT channel_id FROM sessions WHERE session_id = ?")
+      .get(sessionId) as { channel_id: string | null } | undefined;
+
+    const channelId = session?.channel_id;
+
+    // Step 2: channel_id → repo_name (if channel has a specific repo)
+    let repoName: string | undefined;
+    if (channelId) {
+      const channelRepo = database
+        .prepare("SELECT repo_name FROM channel_repos WHERE channel_id = ?")
+        .get(channelId) as { repo_name: string } | undefined;
+      repoName = channelRepo?.repo_name;
+    }
+
+    // Step 3: Get the target repo dir
+    const dirs: string[] = [];
+
+    if (repoName) {
+      const repo = database
+        .prepare("SELECT dir FROM repos WHERE name = ? AND enabled = 1")
+        .get(repoName) as { dir: string } | undefined;
+      if (repo) {
+        dirs.push(normalize(resolve(repo.dir)));
+      }
+    }
+
+    // Always include the default repo (it's the OpenCode server's CWD)
+    const defaultRepo = database
+      .prepare("SELECT dir FROM repos WHERE is_default = 1 AND enabled = 1")
+      .get() as { dir: string } | undefined;
+    if (defaultRepo) {
+      const defaultDir = normalize(resolve(defaultRepo.dir));
+      if (!dirs.includes(defaultDir)) {
+        dirs.push(defaultDir);
+      }
+    }
+
+    // If no repos found at all, fail open
+    if (dirs.length === 0) {
+      sessionCache.set(sessionId, { dirs: [], ts: Date.now() });
+      return [];
+    }
+
+    sessionCache.set(sessionId, { dirs, ts: Date.now() });
+    return dirs;
   } catch {
-    // If file doesn't exist or is invalid, allow everything (fail-open for safety on startup)
+    // Query failed — fail open
     return [];
   }
 }
@@ -49,17 +109,14 @@ function getAllowedDirs(): string[] {
  * Check if an absolute path is within one of the allowed directories.
  */
 function isPathAllowed(filePath: string, allowedDirs: string[]): boolean {
-  // If no allowed dirs configured, allow everything (fail-open)
-  if (allowedDirs.length === 0) return true;
+  if (allowedDirs.length === 0) return true; // fail open
 
   const normalized = normalize(resolve(filePath));
 
-  // Always-allowed paths
   for (const allowed of ALWAYS_ALLOWED) {
     if (normalized.startsWith(allowed + "/") || normalized === allowed) return true;
   }
 
-  // Check against allowed repo dirs
   for (const dir of allowedDirs) {
     if (normalized.startsWith(dir + "/") || normalized === dir) return true;
   }
@@ -68,27 +125,21 @@ function isPathAllowed(filePath: string, allowedDirs: string[]): boolean {
 }
 
 /**
- * Try to extract a path argument from a bash command string.
- * This is best-effort — bash commands are complex and we can't parse all cases.
- * Returns the paths found, or empty array if we can't determine them.
+ * Try to extract absolute paths from a bash command string.
+ * Best-effort — only catches explicit absolute paths.
  */
 function extractPathsFromBash(command: string): string[] {
   const paths: string[] = [];
-
-  // Split on pipes and process each segment
   const segments = command.split(/\s*\|\s*/);
   for (const segment of segments) {
     const parts = segment.trim().split(/\s+/);
     for (const part of parts) {
-      // Skip flags, commands, and common non-path arguments
       if (part.startsWith("-") || part === "" || part.startsWith("$")) continue;
-      // If it looks like an absolute path, check it
       if (part.startsWith("/")) {
         paths.push(part);
       }
     }
   }
-
   return paths;
 }
 
@@ -96,42 +147,46 @@ export default function repoScopePlugin() {
   return {
     name: "repo-scope",
     hooks: {
-      "tool.execute.before": async (input: { tool: string; args: Record<string, unknown> }) => {
-        const allowedDirs = getAllowedDirs();
-        if (allowedDirs.length === 0) return; // fail-open if not configured
+      "tool.execute.before": async (input: { tool: string; args: Record<string, unknown>; sessionID?: string }) => {
+        const sessionId = input.sessionID;
+        if (!sessionId) return; // no session context — fail open
+
+        const allowedDirs = getAllowedDirsForSession(sessionId);
+        if (allowedDirs.length === 0) return; // fail open
 
         const tool = input.tool;
 
-        // Check file path tools: read, grep, glob, list
+        // File path tools: read, list
         if (tool === "read" || tool === "list") {
           const filePath = (input.args.filePath || input.args.path) as string | undefined;
           if (filePath && !isPathAllowed(filePath, allowedDirs)) {
             throw new Error(
-              `Access denied: \`${filePath}\` is outside the allowed repositories. ` +
+              `Access denied: \`${filePath}\` is outside your assigned repository. ` +
               `You can only access files within: ${allowedDirs.join(", ")}`
             );
           }
         }
 
+        // Search tools: grep, glob
         if (tool === "grep" || tool === "glob") {
           const searchPath = (input.args.path || input.args.directory) as string | undefined;
           if (searchPath && !isPathAllowed(searchPath, allowedDirs)) {
             throw new Error(
-              `Access denied: \`${searchPath}\` is outside the allowed repositories. ` +
+              `Access denied: \`${searchPath}\` is outside your assigned repository. ` +
               `You can only search within: ${allowedDirs.join(", ")}`
             );
           }
         }
 
-        // Check bash commands for absolute paths
+        // Bash: check absolute paths in command
         if (tool === "bash") {
           const command = input.args.command as string | undefined;
-          if (command && BASH_PATH_COMMANDS.test(command)) {
+          if (command) {
             const paths = extractPathsFromBash(command);
             for (const p of paths) {
               if (!isPathAllowed(p, allowedDirs)) {
                 throw new Error(
-                  `Access denied: bash command references \`${p}\` which is outside the allowed repositories. ` +
+                  `Access denied: command references \`${p}\` which is outside your assigned repository. ` +
                   `You can only access: ${allowedDirs.join(", ")}`
                 );
               }

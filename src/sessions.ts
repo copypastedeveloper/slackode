@@ -16,13 +16,19 @@ function getDb(): Database.Database {
       CREATE TABLE IF NOT EXISTS sessions (
         thread_key TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
+        channel_id TEXT,
         compacted INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
-    // Migration for existing databases that lack the compacted column.
+    // Migrations for existing databases.
     try {
       db.exec(`ALTER TABLE sessions ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0`);
+    } catch {
+      // Column already exists — ignore.
+    }
+    try {
+      db.exec(`ALTER TABLE sessions ADD COLUMN channel_id TEXT`);
     } catch {
       // Column already exists — ignore.
     }
@@ -99,12 +105,12 @@ export function getSessionId(threadKey: string): string | undefined {
   return row?.session_id;
 }
 
-export function saveSession(threadKey: string, sessionId: string): void {
+export function saveSession(threadKey: string, sessionId: string, channelId?: string): void {
   getDb()
     .prepare(
-      "INSERT OR REPLACE INTO sessions (thread_key, session_id) VALUES (?, ?)"
+      "INSERT OR REPLACE INTO sessions (thread_key, session_id, channel_id) VALUES (?, ?, ?)"
     )
-    .run(threadKey, sessionId);
+    .run(threadKey, sessionId, channelId ?? null);
 }
 
 export function isSessionCompacted(threadKey: string): boolean {
@@ -125,7 +131,8 @@ export function setSessionCompacted(threadKey: string, compacted: boolean): void
  * Returns isNew so the caller can include full context in the first message.
  */
 export async function getOrCreateSession(
-  threadKey: string
+  threadKey: string,
+  channelId?: string,
 ): Promise<{ sessionId: string; isNew: boolean }> {
   const existing = getSessionId(threadKey);
   if (existing) {
@@ -133,7 +140,7 @@ export async function getOrCreateSession(
   }
 
   const sessionId = await createSession(`Slack thread: ${threadKey}`);
-  saveSession(threadKey, sessionId);
+  saveSession(threadKey, sessionId, channelId);
 
   return { sessionId, isNew: true };
 }
