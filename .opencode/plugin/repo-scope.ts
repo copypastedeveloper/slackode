@@ -1,6 +1,5 @@
-import { readFileSync } from "node:fs";
 import { resolve, normalize } from "node:path";
-import Database from "better-sqlite3";
+import Database, { type Statement } from "better-sqlite3";
 
 /**
  * OpenCode plugin that constrains file access on a per-session basis.
@@ -20,89 +19,106 @@ const DB_PATH = process.env.SESSIONS_DB_PATH || "/home/appuser/.local/share/open
 // Also allow access to /tmp (for scratch work) and the .opencode dir
 const ALWAYS_ALLOWED = ["/tmp", "/app/repo/.opencode"];
 
-// Cache resolved session→dirs mappings (TTL: 30s)
-const sessionCache = new Map<string, { dirs: string[]; ts: number }>();
-const CACHE_TTL_MS = 30_000;
+// ── Caching ──
+// Session→channel never changes after creation, so we cache indefinitely.
+// Channel→repo can change via config commands, so we use a short TTL.
+// We cap total entries to prevent unbounded growth.
 
+const sessionToChannel = new Map<string, string | null>(); // sessionID → channelID (permanent)
+const channelToDirs = new Map<string, { dirs: string[]; ts: number }>(); // channelID → dirs (TTL)
+const CHANNEL_CACHE_TTL_MS = 60_000;
+const MAX_SESSION_CACHE = 5_000;
+
+// ── Prepared statements (created once per DB connection) ──
 let db: Database.Database | null = null;
+let stmtSessionChannel: Statement | null = null;
+let stmtChannelRepo: Statement | null = null;
+let stmtRepoDir: Statement | null = null;
+let stmtDefaultRepo: Statement | null = null;
 
 function getDb(): Database.Database | null {
   if (db) return db;
   try {
     db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+    stmtSessionChannel = db.prepare("SELECT channel_id FROM sessions WHERE session_id = ?");
+    stmtChannelRepo = db.prepare("SELECT repo_name FROM channel_repos WHERE channel_id = ?");
+    stmtRepoDir = db.prepare("SELECT dir FROM repos WHERE name = ? AND enabled = 1");
+    stmtDefaultRepo = db.prepare("SELECT dir FROM repos WHERE is_default = 1 AND enabled = 1");
     return db;
   } catch {
-    // DB not available yet (server starting up) — fail open
     return null;
   }
 }
 
 /**
- * Resolve the allowed directories for a given OpenCode session ID.
- * Returns the specific repo dir for the session's channel, plus the default repo.
+ * Resolve the channel ID for a session (cached permanently since it never changes).
  */
-function getAllowedDirsForSession(sessionId: string): string[] {
-  // Check cache
-  const cached = sessionCache.get(sessionId);
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+function getChannelForSession(sessionId: string): string | null {
+  if (sessionToChannel.has(sessionId)) {
+    return sessionToChannel.get(sessionId)!;
+  }
+
+  const database = getDb();
+  if (!database || !stmtSessionChannel) return null;
+
+  const row = stmtSessionChannel.get(sessionId) as { channel_id: string | null } | undefined;
+  const channelId = row?.channel_id ?? null;
+
+  // Evict oldest entries if cache is too large
+  if (sessionToChannel.size >= MAX_SESSION_CACHE) {
+    const firstKey = sessionToChannel.keys().next().value;
+    if (firstKey) sessionToChannel.delete(firstKey);
+  }
+
+  sessionToChannel.set(sessionId, channelId);
+  return channelId;
+}
+
+/**
+ * Resolve the allowed directories for a channel (cached with TTL since config can change).
+ */
+function getDirsForChannel(channelId: string | null): string[] {
+  const cacheKey = channelId ?? "__default__";
+  const cached = channelToDirs.get(cacheKey);
+  if (cached && Date.now() - cached.ts < CHANNEL_CACHE_TTL_MS) {
     return cached.dirs;
   }
 
   const database = getDb();
-  if (!database) return []; // fail open
+  if (!database || !stmtChannelRepo || !stmtRepoDir || !stmtDefaultRepo) return [];
 
-  try {
-    // Step 1: session_id → channel_id
-    const session = database
-      .prepare("SELECT channel_id FROM sessions WHERE session_id = ?")
-      .get(sessionId) as { channel_id: string | null } | undefined;
+  const dirs: string[] = [];
 
-    const channelId = session?.channel_id;
-
-    // Step 2: channel_id → repo_name (if channel has a specific repo)
-    let repoName: string | undefined;
-    if (channelId) {
-      const channelRepo = database
-        .prepare("SELECT repo_name FROM channel_repos WHERE channel_id = ?")
-        .get(channelId) as { repo_name: string } | undefined;
-      repoName = channelRepo?.repo_name;
-    }
-
-    // Step 3: Get the target repo dir
-    const dirs: string[] = [];
-
-    if (repoName) {
-      const repo = database
-        .prepare("SELECT dir FROM repos WHERE name = ? AND enabled = 1")
-        .get(repoName) as { dir: string } | undefined;
+  // Look up channel-specific repo
+  if (channelId) {
+    const channelRepo = stmtChannelRepo.get(channelId) as { repo_name: string } | undefined;
+    if (channelRepo) {
+      const repo = stmtRepoDir.get(channelRepo.repo_name) as { dir: string } | undefined;
       if (repo) {
         dirs.push(normalize(resolve(repo.dir)));
       }
     }
-
-    // Always include the default repo (it's the OpenCode server's CWD)
-    const defaultRepo = database
-      .prepare("SELECT dir FROM repos WHERE is_default = 1 AND enabled = 1")
-      .get() as { dir: string } | undefined;
-    if (defaultRepo) {
-      const defaultDir = normalize(resolve(defaultRepo.dir));
-      if (!dirs.includes(defaultDir)) {
-        dirs.push(defaultDir);
-      }
-    }
-
-    // If no repos found at all, fail open
-    if (dirs.length === 0) {
-      sessionCache.set(sessionId, { dirs: [], ts: Date.now() });
-      return [];
-    }
-
-    sessionCache.set(sessionId, { dirs, ts: Date.now() });
-    return dirs;
-  } catch {
-    // Query failed — fail open
-    return [];
   }
+
+  // Always include the default repo
+  const defaultRepo = stmtDefaultRepo.get() as { dir: string } | undefined;
+  if (defaultRepo) {
+    const defaultDir = normalize(resolve(defaultRepo.dir));
+    if (!dirs.includes(defaultDir)) {
+      dirs.push(defaultDir);
+    }
+  }
+
+  channelToDirs.set(cacheKey, { dirs, ts: Date.now() });
+  return dirs;
+}
+
+/**
+ * Get the allowed directories for a session.
+ */
+function getAllowedDirsForSession(sessionId: string): string[] {
+  const channelId = getChannelForSession(sessionId);
+  return getDirsForChannel(channelId);
 }
 
 /**
@@ -125,8 +141,7 @@ function isPathAllowed(filePath: string, allowedDirs: string[]): boolean {
 }
 
 /**
- * Try to extract absolute paths from a bash command string.
- * Best-effort — only catches explicit absolute paths.
+ * Extract absolute paths from a bash command string (best-effort).
  */
 function extractPathsFromBash(command: string): string[] {
   const paths: string[] = [];
@@ -149,7 +164,7 @@ export default function repoScopePlugin() {
     hooks: {
       "tool.execute.before": async (input: { tool: string; args: Record<string, unknown>; sessionID?: string }) => {
         const sessionId = input.sessionID;
-        if (!sessionId) return; // no session context — fail open
+        if (!sessionId) return;
 
         const allowedDirs = getAllowedDirsForSession(sessionId);
         if (allowedDirs.length === 0) return; // fail open
