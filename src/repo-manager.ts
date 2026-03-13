@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   getEnabledRepos, getDefaultRepo, getRepo, upsertRepo,
@@ -67,10 +67,13 @@ function pullRepo(dir: string): void {
 /**
  * Remove agent/skill/plugin files that could override the read-only behavior.
  * Mirrors the clean_repo_agents function in entrypoint.sh.
+ * For the default repo, we preserve .opencode/plugin/ (our repo-scope plugin lives there).
  */
 function cleanRepoAgents(dir: string): void {
+  const isDefault = dir === DEFAULT_REPO_DIR;
   const dirsToRemove = [
-    ".opencode/agents", ".opencode/plugin", ".opencode/plugins",
+    ".opencode/agents",
+    ...(isDefault ? [] : [".opencode/plugin", ".opencode/plugins"]),
     ".claude/skills", ".claude", ".agents",
   ];
   const filesToRemove = [
@@ -118,6 +121,24 @@ function getBaseRuleFiles(dir: string): string[] {
 }
 
 /**
+ * Write the allowed-repos.json file that the OpenCode repo-scope plugin reads.
+ * This file lists all enabled repo directories so the plugin can enforce
+ * path constraints on tool calls.
+ */
+export function writeAllowedReposFile(): void {
+  const repos = getEnabledRepos();
+  const dirs = repos.map((r) => r.dir);
+  const outPath = path.join(DEFAULT_REPO_DIR, ".opencode", "allowed-repos.json");
+  try {
+    mkdirSync(path.dirname(outPath), { recursive: true });
+    writeFileSync(outPath, JSON.stringify({ dirs }, null, 2));
+    console.log(`[repo-manager] allowed-repos.json written (${dirs.length} repos).`);
+  } catch (err) {
+    console.warn("[repo-manager] Failed to write allowed-repos.json:", err);
+  }
+}
+
+/**
  * Initialize the repo manager on startup.
  * Seeds the default repo from env if the DB repos table is empty.
  * Ensures all enabled repos are cloned and have context generated.
@@ -151,6 +172,9 @@ export async function initRepos(): Promise<void> {
     }
     ensureRulesDir(repo.dir);
   }
+
+  // Write the allowed repos file for the OpenCode plugin
+  writeAllowedReposFile();
 }
 
 /**
@@ -171,6 +195,9 @@ export async function addRepo(name: string, url: string): Promise<void> {
   // If this is the first repo, make it the default
   const isDefault = getEnabledRepos().length === 0;
   upsertRepo(name, url, dir, isDefault);
+
+  // Update allowed repos file for the plugin
+  writeAllowedReposFile();
 
   // Generate context for the new repo (non-blocking)
   generateContext(dir, name).catch((err) => {
