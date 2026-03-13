@@ -21,12 +21,12 @@ const ALWAYS_ALLOWED = ["/tmp", "/app/repo/.opencode"];
 
 // ── Caching ──
 // Session→channel never changes after creation, so we cache indefinitely.
-// Channel→repo can change via config commands, so we use a short TTL.
+// Channel→repo rarely changes, so we use a long TTL (10 min).
 // We cap total entries to prevent unbounded growth.
 
 const sessionToChannel = new Map<string, string | null>(); // sessionID → channelID (permanent)
 const channelToDirs = new Map<string, { dirs: string[]; ts: number }>(); // channelID → dirs (TTL)
-const CHANNEL_CACHE_TTL_MS = 60_000;
+const CHANNEL_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_SESSION_CACHE = 5_000;
 
 // ── Prepared statements (created once per DB connection) ──
