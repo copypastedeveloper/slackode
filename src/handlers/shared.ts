@@ -5,14 +5,16 @@ import {
   getChannelAgent, getChannelTools, resolveAgent,
   isSessionCompacted, setSessionCompacted,
 } from "../sessions.js";
-import { askQuestion } from "../opencode.js";
+import { askQuestion, type RepoInfo } from "../opencode.js";
 import { isRestarting, waitForRestart } from "../opencode-server.js";
+import { resolveRepoForChannel } from "../repo-manager.js";
 import { formatResponse } from "../utils/formatting.js";
 import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
 import { downloadFiles, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
 import { handleConfigCommand } from "./config-commands.js";
 import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
+import { handleRepoCommand } from "./repo-commands.js";
 
 // ── processIncoming: shared pipeline for DMs and mentions ──
 
@@ -78,6 +80,12 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: configReply });
       return;
     }
+
+    const repoReply = await handleRepoCommand(question, channelId, userId, threadTs, client);
+    if (repoReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: repoReply });
+      return;
+    }
   }
 
   // ── Post placeholder ──
@@ -126,6 +134,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     const channelAgent = getChannelAgent(channelId);
     const channelTools = getChannelTools(channelId);
     const agent = resolveAgent(channelAgent, channelTools);
+    const repo = resolveRepoForChannel(channelId);
 
     await handleQuestion({
       client,
@@ -138,6 +147,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
       tools: channelTools,
       threadContext,
       files,
+      repo,
     });
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
@@ -172,6 +182,8 @@ export interface HandleQuestionOpts {
   threadContext?: string;
   /** File attachments (images/PDFs) converted to data URIs. */
   files?: ConvertedFile[];
+  /** Resolved repo info for multi-repo support. */
+  repo?: RepoInfo;
 }
 
 /**
@@ -180,7 +192,7 @@ export interface HandleQuestionOpts {
  * and posting the response back to Slack.
  */
 export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
-  const { client, channel, threadTs, placeholderTs, question, slackCtx, agent, tools, threadContext, files } = opts;
+  const { client, channel, threadTs, placeholderTs, question, slackCtx, agent, tools, threadContext, files, repo } = opts;
 
   // If the OpenCode server is restarting, return a friendly message
   if (isRestarting()) {
@@ -212,7 +224,7 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     console.warn("[linked-threads] Failed to fetch linked threads:", err);
   }
 
-  const { sessionId, isNew } = await getOrCreateSession(threadTs);
+  const { sessionId, isNew } = await getOrCreateSession(threadTs, channel);
 
   // If a previous response triggered compaction, re-send full instructions
   // so the agent recovers its behavioral constraints, then clear the flag.
@@ -233,6 +245,7 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     agent,
     tools,
     files,
+    repo,
   };
 
   let result;

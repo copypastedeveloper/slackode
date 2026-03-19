@@ -7,11 +7,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { getClient, createSession, getBaseUrl } from "./opencode.js";
 
-// Path to the repo directory (where OpenCode server runs)
-const REPO_DIR = process.env.REPO_DIR || "/app/repo";
-const CONTEXT_SHA_FILE = path.join(REPO_DIR, ".opencode/rules/.context-sha");
-
-const CONTEXT_FILES = [
+const CONTEXT_FILE_NAMES = [
   ".opencode/rules/repo-overview.md",
   ".opencode/rules/directory-map.md",
   ".opencode/rules/key-abstractions.md",
@@ -21,17 +17,18 @@ const CONTEXT_FILES = [
 /**
  * Get the current HEAD SHA of the repo.
  */
-function getHeadSha(): string {
-  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_DIR, encoding: "utf-8" }).trim();
+function getHeadSha(repoDir: string): string {
+  return execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf-8" }).trim();
 }
 
 /**
  * Get the SHA from the last successful context generation, or null if none.
  */
-function getLastContextSha(): string | null {
+function getLastContextSha(repoDir: string): string | null {
+  const shaFile = path.join(repoDir, ".opencode/rules/.context-sha");
   try {
-    if (existsSync(CONTEXT_SHA_FILE)) {
-      return readFileSync(CONTEXT_SHA_FILE, "utf-8").trim();
+    if (existsSync(shaFile)) {
+      return readFileSync(shaFile, "utf-8").trim();
     }
   } catch {
     // File doesn't exist or isn't readable
@@ -42,29 +39,30 @@ function getLastContextSha(): string | null {
 /**
  * Save the current HEAD SHA as the last context generation point.
  */
-function saveContextSha(sha: string): void {
-  writeFileSync(CONTEXT_SHA_FILE, sha + "\n", "utf-8");
+function saveContextSha(repoDir: string, sha: string): void {
+  const shaFile = path.join(repoDir, ".opencode/rules/.context-sha");
+  writeFileSync(shaFile, sha + "\n", "utf-8");
 }
 
 /**
  * Check if the context files already exist (i.e. a full generation has run before).
  */
-function contextFilesExist(): boolean {
-  return CONTEXT_FILES.every((f) => existsSync(path.join(REPO_DIR, f)));
+function contextFilesExist(repoDir: string): boolean {
+  return CONTEXT_FILE_NAMES.every((f) => existsSync(path.join(repoDir, f)));
 }
 
 /**
  * Get the git log and diffstat between two SHAs.
  */
-function getChangesSince(fromSha: string): { log: string; diffstat: string } {
+function getChangesSince(repoDir: string, fromSha: string): { log: string; diffstat: string } {
   const log = execFileSync("git", ["log", "--oneline", `${fromSha}..HEAD`], {
-    cwd: REPO_DIR,
+    cwd: repoDir,
     encoding: "utf-8",
     maxBuffer: 1024 * 1024,
   }).trim();
 
   const diffstat = execFileSync("git", ["diff", "--stat", `${fromSha}..HEAD`], {
-    cwd: REPO_DIR,
+    cwd: repoDir,
     encoding: "utf-8",
     maxBuffer: 1024 * 1024,
   }).trim();
@@ -73,11 +71,12 @@ function getChangesSince(fromSha: string): { log: string; diffstat: string } {
 }
 
 /**
- * Read the current contents of all context files.
+ * Read the current contents of all context files for a given repo directory.
+ * Exported so that the OpenCode client can include non-default repo context in prompts.
  */
-function readCurrentContextFiles(): string {
-  return CONTEXT_FILES.map((f) => {
-    const fullPath = path.join(REPO_DIR, f);
+export function readRepoContextFiles(repoDir: string): string {
+  return CONTEXT_FILE_NAMES.map((f) => {
+    const fullPath = path.join(repoDir, f);
     try {
       const content = readFileSync(fullPath, "utf-8");
       return `### ${f}\n\`\`\`markdown\n${content}\n\`\`\``;
@@ -201,11 +200,10 @@ function getToolStateType(part: { state?: unknown }): string | undefined {
  *
  * Called on startup and every hour.
  */
-export async function generateContext(): Promise<void> {
-  const repoName = process.env.TARGET_REPO || "the target repository";
-  const currentSha = getHeadSha();
-  const lastSha = getLastContextSha();
-  const hasContextFiles = contextFilesExist();
+export async function generateContext(repoDir: string, repoName: string): Promise<void> {
+  const currentSha = getHeadSha(repoDir);
+  const lastSha = getLastContextSha(repoDir);
+  const hasContextFiles = contextFilesExist(repoDir);
 
   // Determine if this is a full gen or incremental update
   let prompt: string;
@@ -223,13 +221,13 @@ export async function generateContext(): Promise<void> {
   } else {
     // Incremental update
     mode = "incremental";
-    const { log, diffstat } = getChangesSince(lastSha);
+    const { log, diffstat } = getChangesSince(repoDir, lastSha);
     if (!log) {
       console.log(`[context-gen] No commits found between ${lastSha.slice(0, 8)} and ${currentSha.slice(0, 8)}. Skipping.`);
-      saveContextSha(currentSha);
+      saveContextSha(repoDir, currentSha);
       return;
     }
-    const currentContext = readCurrentContextFiles();
+    const currentContext = readRepoContextFiles(repoDir);
     prompt = buildIncrementalPrompt(repoName, log, diffstat, currentContext);
     console.log(`[context-gen] Starting incremental context update (${lastSha.slice(0, 8)}..${currentSha.slice(0, 8)})...`);
   }
@@ -283,6 +281,6 @@ export async function generateContext(): Promise<void> {
   }
 
   // Save the SHA so the next run knows where to diff from
-  saveContextSha(currentSha);
+  saveContextSha(repoDir, currentSha);
   console.log(`[context-gen] Context generation complete (${mode}, sha: ${currentSha.slice(0, 8)}).`);
 }
