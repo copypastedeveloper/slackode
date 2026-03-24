@@ -80,7 +80,8 @@ export interface ThreadContextResult {
 
 /**
  * Fetch the preceding messages in a Slack thread and format them as context.
- * Excludes bot messages and the current message (identified by currentTs).
+ * Includes bot messages (labeled as "Bot") and excludes only the current
+ * message (identified by currentTs).
  * Also collects file attachments (images/PDFs) from thread messages.
  * Returns formatted text + files, or empty result if no thread or no messages.
  */
@@ -109,9 +110,6 @@ export async function fetchThreadContext(
     for (const msg of messages) {
       // Skip the current message (the one that tagged the bot)
       if (msg.ts === currentTs) continue;
-      // Skip bot messages
-      if (msg.bot_id) continue;
-      if (botUserId && msg.user === botUserId) continue;
 
       // Collect file attachments from thread messages
       const msgAny = msg as Record<string, unknown>;
@@ -127,9 +125,11 @@ export async function fetchThreadContext(
       // Skip messages without text for the text context
       if (!msg.text) continue;
 
-      // Resolve user name
+      // Resolve display name (human user or bot)
       let name = "Unknown";
-      if (msg.user) {
+      if (msg.bot_id || (botUserId && msg.user === botUserId)) {
+        name = "Bot";
+      } else if (msg.user) {
         if (userNames.has(msg.user)) {
           name = userNames.get(msg.user)!;
         } else {

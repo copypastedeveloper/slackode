@@ -7,7 +7,7 @@ import {
   type RepoRow,
 } from "./sessions.js";
 import { generateContext } from "./context-gen.js";
-import type { RepoInfo } from "./opencode.js";
+import type { RepoInfo } from "./context-prefix.js";
 
 /** Base directory for dynamically added repos. */
 const REPOS_BASE_DIR = process.env.REPOS_BASE_DIR || "/app/repos";
@@ -48,9 +48,27 @@ function cloneRepo(url: string, dir: string): void {
 
 /**
  * Pull latest changes for a repo.
+ * If the repo has active worktrees, only fetch (don't update the working tree)
+ * to avoid conflicts with coding sessions.
  */
 function pullRepo(dir: string): void {
   try {
+    // Check for active worktrees (beyond the main working tree)
+    const worktreeList = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: dir, encoding: "utf-8", timeout: 5_000,
+    }).trim();
+    const worktreeCount = worktreeList.split("\n").filter((l) => l.startsWith("worktree ")).length;
+    if (worktreeCount > 1) {
+      console.log(`[repo-manager] ${dir} has ${worktreeCount - 1} active worktree(s) — fetching only.`);
+      execFileSync("git", ["fetch", "origin"], {
+        cwd: dir,
+        encoding: "utf-8",
+        env: process.env,
+        timeout: 2 * 60 * 1000,
+      });
+      return;
+    }
+
     execFileSync("git", ["pull", "--ff-only"], {
       cwd: dir,
       encoding: "utf-8",

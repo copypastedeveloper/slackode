@@ -5,8 +5,14 @@ import { closeDb, seedToolsFromFile } from "./sessions.js";
 import { writeOpencodeConfig } from "./opencode-config.js";
 import { setRepoDir, startServer, stopServer } from "./opencode-server.js";
 import { initRepos, generateContextForAllRepos } from "./repo-manager.js";
+import {
+  startSessionReaper, destroyAllCodingSessions, cleanupOrphanedSessions,
+} from "./coding-session.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
+import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
+import { resumeCodingWithAgent, handleApprove, handleRevise } from "./handlers/coding-handler.js";
+import { Action, MAX_AGENT_BUTTONS } from "./constants.js";
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN;
@@ -32,6 +38,70 @@ const app = new App({
 // Register event handlers
 app.event("app_mention", handleMention);
 app.event("message", handleDm);
+
+// Register coding session button actions
+app.action(Action.CODING_STATUS, async ({ action, ack, body, client }) => {
+  await ack();
+  const threadTs = (action as { value: string }).value;
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  if (!channel) return;
+  const reply = await handleStatus(threadTs);
+  await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
+});
+
+app.action(Action.CODING_PR, async ({ action, ack, body, client }) => {
+  await ack();
+  const threadTs = (action as { value: string }).value;
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  if (!channel) return;
+  const reply = await handlePR(threadTs, body.user.id, undefined, false);
+  await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
+});
+
+app.action(Action.CODING_DONE, async ({ action, ack, body, client }) => {
+  await ack();
+  const threadTs = (action as { value: string }).value;
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  if (!channel) return;
+  const reply = await handlePR(threadTs, body.user.id, undefined, true);
+  await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
+});
+
+// Agent selection buttons (select_agent_0 through select_agent_N)
+for (let i = 0; i < MAX_AGENT_BUTTONS; i++) {
+  app.action(`${Action.SELECT_AGENT_PREFIX}${i}`, async ({ action, ack, body, client }) => {
+    await ack();
+    const { threadTs, agent } = JSON.parse((action as { value: string }).value);
+    const channel = (body as { channel?: { id: string } }).channel?.id;
+    if (!channel) return;
+    await resumeCodingWithAgent(threadTs, agent, client, channel);
+  });
+}
+
+app.action(Action.CODING_APPROVE, async ({ action, ack, body, client }) => {
+  await ack();
+  const threadTs = (action as { value: string }).value;
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  if (!channel) return;
+  await handleApprove(threadTs, body.user.id, client, channel);
+});
+
+app.action(Action.CODING_REVISE, async ({ action, ack, body, client }) => {
+  await ack();
+  const threadTs = (action as { value: string }).value;
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  if (!channel) return;
+  await handleRevise(threadTs, body.user.id, client, channel);
+});
+
+app.action(Action.CODING_CANCEL, async ({ action, ack, body, client }) => {
+  await ack();
+  const threadTs = (action as { value: string }).value;
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  if (!channel) return;
+  const reply = await handleCancel(threadTs, body.user.id);
+  await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
+});
 
 /**
  * Run context generation for all repos, logging errors but never crashing the bot.
@@ -62,9 +132,15 @@ async function start(): Promise<void> {
   // 5. Initialize repo manager (seeds default repo from env if needed)
   await initRepos();
 
-  // 6. Start Slack bot
+  // 6. Clean up any orphaned coding sessions from a prior crash
+  cleanupOrphanedSessions();
+
+  // 7. Start Slack bot
   await app.start();
   console.log(`Slack bot is running (OpenCode server: ${OPENCODE_URL})`);
+
+  // 8. Start coding session idle reaper (every 5 min)
+  const reaperInterval = startSessionReaper();
 
   // Generate context files on startup (non-blocking — bot is already serving)
   runContextGeneration();
@@ -76,6 +152,7 @@ async function start(): Promise<void> {
 // Graceful shutdown
 async function shutdown(): Promise<void> {
   console.log("Shutting down...");
+  await destroyAllCodingSessions();
   await stopServer();
   closeDb();
   process.exit(0);
