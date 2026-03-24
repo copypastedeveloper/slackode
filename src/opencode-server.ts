@@ -1,11 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createOpencodeClient } from "@opencode-ai/sdk";
 import { writeOpencodeConfig } from "./opencode-config.js";
+import { HOSTNAME, QA_SERVER_PORT, waitForHealth } from "./constants.js";
 
-const PORT = 4096;
-const HOSTNAME = "127.0.0.1";
+const PORT = QA_SERVER_PORT;
 const HEALTH_URL = `http://${HOSTNAME}:${PORT}/global/health`;
-const HEALTH_TIMEOUT_MS = 60_000;
-const HEALTH_POLL_MS = 1_000;
 
 let serverProcess: ChildProcess | null = null;
 let restarting = false;
@@ -49,6 +48,7 @@ export async function startServer(): Promise<void> {
     cwd: repoDir,
     stdio: "inherit",
     env: process.env,
+    detached: true,
   });
 
   serverProcess.on("error", (err) => {
@@ -68,25 +68,7 @@ export async function startServer(): Promise<void> {
     }
   });
 
-  // Poll health endpoint until ready
-  const start = Date.now();
-  while (Date.now() - start < HEALTH_TIMEOUT_MS) {
-    try {
-      const resp = await fetch(HEALTH_URL, {
-        signal: AbortSignal.timeout(2_000),
-      });
-      if (resp.ok) {
-        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        console.log(`[server] OpenCode server is ready (took ${elapsed}s).`);
-        return;
-      }
-    } catch {
-      // Not ready yet
-    }
-    await new Promise((r) => setTimeout(r, HEALTH_POLL_MS));
-  }
-
-  throw new Error(`OpenCode server failed to start within ${HEALTH_TIMEOUT_MS / 1000}s`);
+  await waitForHealth({ url: HEALTH_URL, label: "OpenCode server" });
 }
 
 /**
@@ -99,10 +81,22 @@ export async function stopServer(): Promise<void> {
   const proc = serverProcess;
   serverProcess = null;
 
+  // Try graceful shutdown via API first
+  try {
+    const client = createOpencodeClient({ baseUrl: `http://${HOSTNAME}:${PORT}` });
+    await client.instance.dispose();
+    console.log("[server] Dispose request sent.");
+  } catch {
+    // Server may already be dead — fall through to process kill
+  }
+
   return new Promise<void>((resolve) => {
+    // If dispose worked, the process should exit on its own.
+    // Give it a few seconds, then escalate.
     const timeout = setTimeout(() => {
       console.warn("[server] Force killing OpenCode server (SIGKILL).");
-      proc.kill("SIGKILL");
+      try { if (proc.pid) process.kill(-proc.pid, "SIGKILL"); } catch { /* already dead */ }
+      try { proc.kill("SIGKILL"); } catch { /* already dead */ }
       resolve();
     }, 10_000);
 
@@ -112,7 +106,12 @@ export async function stopServer(): Promise<void> {
       resolve();
     });
 
-    proc.kill("SIGTERM");
+    // Also send SIGTERM to the process group as a belt-and-suspenders approach
+    try {
+      if (proc.pid) process.kill(-proc.pid, "SIGTERM");
+    } catch {
+      try { proc.kill("SIGTERM"); } catch { /* already dead */ }
+    }
   });
 }
 

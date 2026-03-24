@@ -16,9 +16,9 @@ import Database, { type Statement } from "better-sqlite3";
 
 const DB_PATH = process.env.SESSIONS_DB_PATH || "/home/appuser/.local/share/opencode/sessions.db";
 
-// Also allow access to /tmp (for scratch work) and the .opencode dir
+// Also allow access to /tmp (for scratch work), the .opencode dir, and worktrees
 const DEFAULT_REPO_DIR = process.env.REPO_DIR || "/app/repo";
-const ALWAYS_ALLOWED = ["/tmp", `${DEFAULT_REPO_DIR}/.opencode`];
+const ALWAYS_ALLOWED = ["/tmp", `${DEFAULT_REPO_DIR}/.opencode`, `${DEFAULT_REPO_DIR}/.worktrees`];
 
 // ── Caching ──
 // Session→channel never changes after creation, so we cache indefinitely.

@@ -5,14 +5,18 @@ import { getEnabledTools, getToolKey } from "./sessions.js";
 /** Path to the pristine base config (without MCP injections). */
 const BASE_CONFIG_PATH = process.env.BASE_CONFIG_PATH ?? "/app/opencode.json";
 
+export type ConfigMode = "qa" | "code";
+
 /**
  * Reads the pristine base opencode.json, applies the PROVIDER/MODEL,
  * injects MCP server entries and agent variants for all enabled tools
  * (with keys available), and writes the result to the repo dir.
  *
+ * @param mode - "qa" (default): read-only build agent. "code": write-enabled code agent.
+ *
  * Always starts from the base config so restarts don't accumulate entries.
  */
-export function writeOpencodeConfig(repoDir: string): void {
+export function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): void {
   const config = JSON.parse(readFileSync(BASE_CONFIG_PATH, "utf-8"));
 
   // Apply provider/model from env (same as the sed in entrypoint.sh)
@@ -85,6 +89,29 @@ export function writeOpencodeConfig(repoDir: string): void {
       };
     }
     console.log(`[config] Generated agent variants for: ${enabled.join(", ")}`);
+
+    // Create a single enrich agent variant with ALL MCP tools enabled.
+    // This is used for fast context enrichment before coding sessions.
+    const enrichAgent = config.agent.enrich;
+    if (enrichAgent) {
+      const allToolOverrides: Record<string, boolean> = {};
+      for (const t of enabled) allToolOverrides[`${t}*`] = true;
+      config.agent.enrich = {
+        ...enrichAgent,
+        tools: { ...enrichAgent.tools, ...allToolOverrides },
+      };
+    }
+  }
+
+  // In code mode, switch to the write-enabled "code" agent and enable write tools
+  if (mode === "code") {
+    config.default_agent = "code";
+    config.tools.write = true;
+    config.tools.edit = true;
+    config.tools.patch = true;
+    config.permission.edit = { "*": "allow" };
+    config.permission.write = { "*": "allow" };
+    console.log("[config] Code mode: write tools enabled, default agent = code");
   }
 
   const outPath = path.join(repoDir, "opencode.json");

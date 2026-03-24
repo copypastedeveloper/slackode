@@ -93,6 +93,67 @@
         }
       }
     },
+    "code": {
+      "description": "Code-writing assistant for the target codebase",
+      "tools": {
+        "bash": true,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "write": true,
+        "edit": true,
+        "patch": true,
+        "skill": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false
+      },
+      "permission": {
+        "write": {
+          "*": "allow"
+        },
+        "edit": {
+          "*": "allow"
+        },
+        "bash": {
+          "*": "allow"
+        },
+        "skill": {
+          "*": "deny"
+        },
+        "task": {
+          "*": "deny"
+        }
+      }
+    },
+    "enrich": {
+      "description": "Fetches external context (tickets, issues, errors) via MCP tools. No codebase access.",
+      "tools": {
+        "bash": false,
+        "read": false,
+        "grep": false,
+        "glob": false,
+        "list": false,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "skill": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false
+      },
+      "permission": {
+        "edit": "deny",
+        "bash": { "*": "deny" },
+        "skill": { "*": "deny" },
+        "task": { "*": "deny" }
+      }
+    },
     "plan": {
       "disable": true
     },

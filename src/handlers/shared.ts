@@ -1,13 +1,17 @@
 import type { WebClient } from "@slack/web-api";
+import type { KnownBlock } from "@slack/types";
+import type { OpencodeClient } from "@opencode-ai/sdk";
 import {
   getOrCreateSession,
   getChannelConfig,
   getChannelAgent, getChannelTools, resolveAgent,
   isSessionCompacted, setSessionCompacted,
 } from "../sessions.js";
-import { askQuestion, type RepoInfo } from "../opencode.js";
+import { askQuestion, askForShorterResponse } from "../opencode.js";
+import type { RepoInfo } from "../context-prefix.js";
 import { isRestarting, waitForRestart } from "../opencode-server.js";
 import { resolveRepoForChannel } from "../repo-manager.js";
+import { getActiveCodingSession } from "../coding-session.js";
 import { formatResponse } from "../utils/formatting.js";
 import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
 import { downloadFiles, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
@@ -15,6 +19,8 @@ import { createProgressUpdater } from "../utils/progress.js";
 import { handleConfigCommand } from "./config-commands.js";
 import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
 import { handleRepoCommand } from "./repo-commands.js";
+import { handleCodeCommand } from "./code-commands.js";
+import { handleCodingMessage, handleCodeStart } from "./coding-handler.js";
 
 // ── processIncoming: shared pipeline for DMs and mentions ──
 
@@ -84,6 +90,62 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     const repoReply = await handleRepoCommand(question, channelId, userId, threadTs, client);
     if (repoReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: repoReply });
+      return;
+    }
+  }
+
+  // ── Coding session routing ──
+  // 1. Check if this thread has an active coding session
+  const existingCodingSession = getActiveCodingSession(threadTs);
+  if (existingCodingSession) {
+    // Check for code-thread commands (status, pr, done, cancel)
+    if (question) {
+      const codeReply = await handleCodeCommand(question, threadTs, userId, client, channelId);
+      if (codeReply) {
+        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: codeReply });
+        return;
+      }
+    }
+
+    // Route to coding handler
+    await handleCodingMessage({
+      text: question,
+      files: eventFiles,
+      channelId,
+      userId,
+      threadTs,
+      isThread,
+      botUserId,
+      client,
+      slackCtx,
+    });
+    return;
+  }
+
+  // 2. Check if message starts with "code" command to start a new coding session
+  //    Syntax: code [--agent <name>] <description>
+  if (question) {
+    const codeMatch = question.match(/^code\s+([\s\S]+)/i);
+    if (codeMatch) {
+      let rest = codeMatch[1].trim();
+      let agent: string | undefined;
+      const agentMatch = rest.match(/^--agent\s+(\S+)\s*([\s\S]*)/i);
+      if (agentMatch) {
+        agent = agentMatch[1];
+        rest = agentMatch[2].trim();
+      }
+      await handleCodeStart({
+        description: rest || "Help me with this codebase.",
+        agent,
+        channelId,
+        userId,
+        threadTs,
+        client,
+        slackCtx,
+        files: eventFiles,
+        isThread,
+        botUserId,
+      });
       return;
     }
   }
@@ -165,7 +227,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
   }
 }
 
-// ── handleQuestion: low-level Q&A pipeline ──
+// ── handleQuestion: Q&A pipeline ──
 
 export interface HandleQuestionOpts {
   client: WebClient;
@@ -271,26 +333,80 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
 
   progress.stop();
 
-  // Format the response into Slack message payloads (with blocks for tables)
-  const messages = formatResponse(result.text);
-
-  // First message updates the placeholder
-  const first = messages[0];
-  await client.chat.update({
-    channel,
-    ts: placeholderTs,
-    text: first.text,
-    ...(first.blocks && { blocks: first.blocks }),
+  await safePostResponse({
+    client, channel, threadTs, placeholderTs,
+    rawMarkdown: result.text,
+    sessionId,
   });
+}
 
-  // Remaining messages posted as thread replies
-  for (let i = 1; i < messages.length; i++) {
-    const msg = messages[i];
-    await client.chat.postMessage({
+// ── Safe Slack posting (catches msg_too_long and falls back) ──
+
+export interface SafePostOpts {
+  client: WebClient;
+  channel: string;
+  threadTs: string;
+  placeholderTs: string;
+  rawMarkdown: string;
+  /** Session ID to retry with the same agent if msg_too_long. */
+  sessionId?: string;
+  /** Custom OpenCode client (for coding sessions). */
+  customClient?: OpencodeClient;
+  /** Custom base URL (for coding sessions). */
+  customBaseUrl?: string;
+  /** Append action buttons to the last message. */
+  actionButtons?: KnownBlock;
+}
+
+export async function safePostResponse(opts: SafePostOpts): Promise<void> {
+  const { client, channel, threadTs, placeholderTs, rawMarkdown, sessionId, customClient, customBaseUrl, actionButtons } = opts;
+
+  const tryPost = async (markdown: string) => {
+    const messages = formatResponse(markdown);
+    if (actionButtons) {
+      messages[messages.length - 1].blocks.push(actionButtons);
+    }
+    const first = messages[0];
+    await client.chat.update({
       channel,
-      thread_ts: threadTs,
-      text: msg.text,
-      ...(msg.blocks && { blocks: msg.blocks }),
+      ts: placeholderTs,
+      text: first.text,
+      ...(first.blocks && { blocks: first.blocks }),
     });
+    for (let i = 1; i < messages.length; i++) {
+      const msg = messages[i];
+      await client.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: msg.text,
+        ...(msg.blocks && { blocks: msg.blocks }),
+      });
+    }
+  };
+
+  try {
+    await tryPost(rawMarkdown);
+  } catch (err) {
+    const isSlackError = err instanceof Error && err.message.includes("msg_too_long");
+    if (!isSlackError) throw err;
+
+    console.warn("[slack] msg_too_long — asking agent to shorten");
+    await client.chat.update({
+      channel,
+      ts: placeholderTs,
+      text: "_Response was too long — asking for a shorter version..._",
+    });
+
+    if (sessionId) {
+      const shorter = await askForShorterResponse({ sessionId, customClient, customBaseUrl });
+      await tryPost(shorter);
+    } else {
+      // No session to retry with — hard fallback
+      await client.chat.update({
+        channel,
+        ts: placeholderTs,
+        text: "(Response too long for Slack. Please try asking a more specific question.)",
+      });
+    }
   }
 }

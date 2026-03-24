@@ -89,6 +89,8 @@ if [ -n "$GIT_TOKEN" ]; then
   chmod +x "$GIT_ASKPASS_SCRIPT"
   export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
   export GIT_TERMINAL_PROMPT=0
+  # Authenticate gh CLI for PR creation in coding sessions
+  export GH_TOKEN="$GIT_TOKEN"
 else
   echo "WARNING: GIT_TOKEN is not set — clone may fail for private repos."
 fi
@@ -127,6 +129,23 @@ fi
 # ── Create directory for additional repos (multi-repo support) ──
 mkdir -p /app/repos
 
+# ── Clean up orphaned coding session worktrees and processes ──
+echo "Cleaning up orphaned coding sessions..."
+# Prune worktrees on the default repo
+git -C /app/repo worktree prune 2>/dev/null || true
+# Remove leftover .worktrees directories
+rm -rf /app/repo/.worktrees 2>/dev/null || true
+for repo_dir in /app/repos/*/; do
+  [ -d "${repo_dir}.git" ] || continue
+  git -C "$repo_dir" worktree prune 2>/dev/null || true
+  rm -rf "${repo_dir}.worktrees" 2>/dev/null || true
+done
+# Kill any OpenCode processes on coding session ports (4100+)
+for pid in $(lsof -ti :4100-4200 2>/dev/null || true); do
+  kill "$pid" 2>/dev/null || true
+done
+echo "Orphaned coding sessions cleaned up."
+
 # ── Background repo updater (every hour) ──
 # Pulls latest code and cleans repo agents/skills/plugins for all repos.
 # Context regeneration is handled by the bot process (via OpenCode agent).
@@ -135,6 +154,12 @@ mkdir -p /app/repos
 sync_repo() {
   local repo_dir="$1"
   local repo_name="$2"
+  # If worktrees exist (coding sessions active), fetch only to avoid conflicts
+  if [ -d "${repo_dir}/.worktrees" ]; then
+    echo "[repo-sync] ${repo_name} has active worktrees — fetching only."
+    git -C "$repo_dir" fetch origin 2>&1 | sed 's/^/[repo-sync] /' || true
+    return
+  fi
   echo "[repo-sync] Pulling latest ${repo_name}..."
   if git -C "$repo_dir" pull --ff-only 2>&1 | sed 's/^/[repo-sync] /'; then
     echo "[repo-sync] Cleaning repo agent/skill/plugin files..."
