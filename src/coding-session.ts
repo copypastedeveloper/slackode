@@ -1,5 +1,5 @@
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import {
   createOpencodeClient,
@@ -404,6 +404,16 @@ async function destroyCodingSessionInternal(
     }
   }
 
+  // Clean up empty .worktrees directory so repo sync can resume pulling
+  const worktreesDir = path.join(repoDir, ".worktrees");
+  try {
+    if (existsSync(worktreesDir) && readdirSync(worktreesDir).length === 0) {
+      rmSync(worktreesDir, { recursive: true, force: true });
+    }
+  } catch {
+    // Best effort
+  }
+
   // Free port
   freePort(port);
 
@@ -466,31 +476,29 @@ export async function createCodingSessionPR(
   // Stage all changes except bot configuration files
   execFileSync("git", ["add", "-A"], { cwd, encoding: "utf-8", timeout: 10_000 });
   // Unstage bot-managed files/directories that should never be committed
-  for (const path of BOT_MANAGED_PATHS) {
+  for (const managedPath of BOT_MANAGED_PATHS) {
     try {
-      execFileSync("git", ["reset", "HEAD", "--", path], { cwd, encoding: "utf-8", timeout: 5_000 });
+      execFileSync("git", ["reset", "HEAD", "--", managedPath], { cwd, encoding: "utf-8", timeout: 5_000 });
     } catch {
       // Path may not exist or have no staged changes — that's fine
     }
   }
 
-  // Check if there's anything to commit
-  const status = execFileSync("git", ["status", "--porcelain"], {
+  // Determine which files are staged for commit (after excluding bot-managed paths)
+  const stagedFilesOutput = execFileSync("git", ["diff", "--cached", "--name-only"], {
     cwd, encoding: "utf-8", timeout: 10_000,
   }).trim();
 
-  if (!status) {
+  if (!stagedFilesOutput) {
     throw new Error("No changes to commit.");
   }
+
+  const changedFiles = stagedFilesOutput.split("\n").filter(Boolean);
 
   // Get diffstat before commit
   const diffstat = execFileSync("git", ["diff", "--cached", "--stat"], {
     cwd, encoding: "utf-8", timeout: 10_000,
   }).trim();
-
-  const changedFiles = execFileSync("git", ["diff", "--cached", "--name-only"], {
-    cwd, encoding: "utf-8", timeout: 10_000,
-  }).trim().split("\n").filter(Boolean);
 
   // Commit
   const commitMessage = title || `bot: changes from coding session ${row.thread_key}`;

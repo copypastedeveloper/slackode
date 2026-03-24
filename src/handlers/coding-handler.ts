@@ -119,8 +119,8 @@ function codingPlanButtons(threadTs: string): KnownBlock {
 }
 
 /**
- * Remove coding action/PR buttons from all prior bot messages in the thread.
- * Called before posting a new response with buttons so only the latest has them.
+ * Remove coding PR/plan buttons from all prior bot messages in the thread.
+ * Called before posting a new response with these buttons so only the latest has them.
  */
 async function stripPriorCodingButtons(
   client: WebClient,
@@ -164,6 +164,7 @@ export interface CodingMessageOpts {
   channelId: string;
   userId: string;
   threadTs: string;
+  eventTs: string;
   isThread: boolean;
   botUserId?: string;
   client: WebClient;
@@ -175,7 +176,7 @@ export interface CodingMessageOpts {
  * Routes the user's message to the coding session's dedicated OpenCode server.
  */
 export async function handleCodingMessage(opts: CodingMessageOpts): Promise<void> {
-  const { text, files: eventFiles, channelId, userId, threadTs, isThread, botUserId, client, slackCtx } = opts;
+  const { text, files: eventFiles, channelId, userId, threadTs, eventTs, isThread, botUserId, client, slackCtx } = opts;
 
   const session = getActiveCodingSession(threadTs);
   if (!session) return;
@@ -205,7 +206,7 @@ export async function handleCodingMessage(opts: CodingMessageOpts): Promise<void
     // so the coding agent knows what was discussed before "code" was invoked.
     let allFiles = [...eventFiles];
     if (isThread) {
-      const ctx = await fetchThreadContext(client, channelId, threadTs, placeholder.ts!, botUserId);
+      const ctx = await fetchThreadContext(client, channelId, threadTs, eventTs, botUserId);
       if (ctx.text) {
         slackCtx.threadContext = ctx.text;
       }
@@ -347,6 +348,7 @@ export async function resumeCodingWithAgent(
     channelId: pending.channelId,
     userId: pending.userId,
     threadTs: pending.threadTs,
+    eventTs: pending.threadTs,
     isThread: pending.isThread,
     botUserId: pending.botUserId,
     client: pending.client,
@@ -563,6 +565,7 @@ export async function handleCodeStart(opts: CodeStartOpts): Promise<void> {
       channelId,
       userId,
       threadTs,
+      eventTs: threadTs,
       isThread,
       botUserId,
       client,

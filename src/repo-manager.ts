@@ -53,10 +53,13 @@ function cloneRepo(url: string, dir: string): void {
  */
 function pullRepo(dir: string): void {
   try {
-    // Check for active worktrees
-    const hasWorktrees = existsSync(path.join(dir, ".worktrees"));
-    if (hasWorktrees) {
-      console.log(`[repo-manager] ${dir} has active worktrees — fetching only.`);
+    // Check for active worktrees (beyond the main working tree)
+    const worktreeList = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: dir, encoding: "utf-8", timeout: 5_000,
+    }).trim();
+    const worktreeCount = worktreeList.split("\n").filter((l) => l.startsWith("worktree ")).length;
+    if (worktreeCount > 1) {
+      console.log(`[repo-manager] ${dir} has ${worktreeCount - 1} active worktree(s) — fetching only.`);
       execFileSync("git", ["fetch", "origin"], {
         cwd: dir,
         encoding: "utf-8",

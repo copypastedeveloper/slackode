@@ -80,7 +80,8 @@ export interface ThreadContextResult {
 
 /**
  * Fetch the preceding messages in a Slack thread and format them as context.
- * Excludes bot messages and the current message (identified by currentTs).
+ * Includes bot messages (labeled as "Bot") and excludes only the current
+ * message (identified by currentTs).
  * Also collects file attachments (images/PDFs) from thread messages.
  * Returns formatted text + files, or empty result if no thread or no messages.
  */

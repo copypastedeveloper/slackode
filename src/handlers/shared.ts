@@ -114,6 +114,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
       channelId,
       userId,
       threadTs,
+      eventTs,
       isThread,
       botUserId,
       client,
@@ -364,7 +365,13 @@ export async function safePostResponse(opts: SafePostOpts): Promise<void> {
   const tryPost = async (markdown: string) => {
     const messages = formatResponse(markdown);
     if (actionButtons) {
-      messages[messages.length - 1].blocks.push(actionButtons);
+      const last = messages[messages.length - 1];
+      if (last.blocks.length >= 50) {
+        // Last message is full — append buttons as a separate message
+        messages.push({ text: "", blocks: [actionButtons] });
+      } else {
+        last.blocks.push(actionButtons);
+      }
     }
     const first = messages[0];
     await client.chat.update({

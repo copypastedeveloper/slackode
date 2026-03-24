@@ -155,8 +155,10 @@ sync_repo() {
   local repo_dir="$1"
   local repo_name="$2"
   # If worktrees exist (coding sessions active), fetch only to avoid conflicts
-  if [ -d "${repo_dir}/.worktrees" ]; then
-    echo "[repo-sync] ${repo_name} has active worktrees — fetching only."
+  local wt_count
+  wt_count=$(git -C "$repo_dir" worktree list --porcelain 2>/dev/null | grep -c '^worktree ' || echo 0)
+  if [ "$wt_count" -gt 1 ]; then
+    echo "[repo-sync] ${repo_name} has $((wt_count - 1)) active worktree(s) — fetching only."
     git -C "$repo_dir" fetch origin 2>&1 | sed 's/^/[repo-sync] /' || true
     return
   fi
