@@ -36,7 +36,8 @@ RUN mkdir -p /app/repo /app/repos /app/knowledge /home/appuser/.local/share/open
     && chown -R appuser:appuser /app /home/appuser
 
 # Pre-download the embedding model so there's no first-use latency
-RUN node -e "const{pipeline}=require('@huggingface/transformers');pipeline('feature-extraction','Xenova/all-MiniLM-L6-v2').then(()=>console.log('Model cached'))"
+ENV HF_CACHE_DIR=/home/appuser/.local/share/opencode/huggingface
+RUN node --input-type=module -e "import{pipeline,env}from'@huggingface/transformers';env.cacheDir=process.env.HF_CACHE_DIR;await pipeline('feature-extraction','Xenova/all-MiniLM-L6-v2');console.log('Model cached')"
 
 USER appuser
 CMD ["./entrypoint.sh"]

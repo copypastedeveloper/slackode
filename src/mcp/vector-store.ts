@@ -27,13 +27,15 @@ const EMBEDDING_DIMS = 384;
 
 // ── Embedding pipeline (lazy singleton) ──
 
-let embedder: FeatureExtractionPipeline | null = null;
+let embedderPromise: Promise<FeatureExtractionPipeline> | null = null;
 
 async function getEmbedder(): Promise<FeatureExtractionPipeline> {
-  if (!embedder) {
-    embedder = await pipeline("feature-extraction", EMBEDDING_MODEL) as FeatureExtractionPipeline;
+  if (!embedderPromise) {
+    embedderPromise = pipeline("feature-extraction", EMBEDDING_MODEL).then(
+      (p) => p as FeatureExtractionPipeline,
+    );
   }
-  return embedder;
+  return embedderPromise;
 }
 
 export async function embed(text: string): Promise<number[]> {
@@ -198,7 +200,8 @@ export async function searchKnowledge(
   const vectorSearch = table.search(queryVec) as lancedb.VectorQuery;
   let search = vectorSearch.distanceType("cosine").limit(limit);
   if (scope) {
-    search = search.where(`scope = '${scope}'`);
+    const esc = (s: string) => s.replace(/'/g, "''");
+    search = search.where(`scope = '${esc(scope)}'`);
   }
 
   const results = await search.toArray();
@@ -234,13 +237,34 @@ interface SqliteMemoryRow {
 }
 
 let lastIndexedMemoryId = 0;
+let memoryWatermarkInitialized = false;
 
 /** Sync any new memories from SQLite into LanceDB. */
 async function syncMemoryIndex(): Promise<void> {
+  // On first call, initialize watermark from existing LanceDB data to avoid duplicates
+  if (!memoryWatermarkInitialized) {
+    memoryWatermarkInitialized = true;
+    try {
+      const conn = await getDb();
+      const tableNames = await conn.tableNames();
+      if (tableNames.includes("memories")) {
+        const table = await conn.openTable("memories");
+        // Query all rows, get max id
+        const rows = await table.query().select(["id"]).toArray();
+        if (rows.length > 0) {
+          const maxId = Math.max(...rows.map((r: Record<string, unknown>) => r.id as number));
+          lastIndexedMemoryId = maxId;
+          console.log(`[vector] Initialized memory watermark at #${lastIndexedMemoryId}`);
+        }
+      }
+    } catch (err) {
+      console.warn("[vector] Failed to initialize memory watermark:", err);
+    }
+  }
+
   let sqliteDb: Database.Database;
   try {
     sqliteDb = new Database(DB_PATH, { readonly: true });
-    sqliteDb.pragma("journal_mode = WAL");
   } catch {
     return;
   }
@@ -304,9 +328,10 @@ export async function searchMemories(
   const table = await conn.openTable("memories");
   const queryVec = await embed(query);
 
+  const esc = (s: string) => s.replace(/'/g, "''");
   const filters: string[] = [];
-  if (scope) filters.push(`scope = '${scope}'`);
-  if (scopeKey) filters.push(`scope_key = '${scopeKey}'`);
+  if (scope) filters.push(`scope = '${esc(scope)}'`);
+  if (scopeKey) filters.push(`scope_key = '${esc(scopeKey)}'`);
 
   const vectorSearch = table.search(queryVec) as lancedb.VectorQuery;
   let search = vectorSearch.distanceType("cosine").limit(limit);
@@ -373,7 +398,6 @@ export async function getRecentMemories(
   let sqliteDb: Database.Database;
   try {
     sqliteDb = new Database(DB_PATH, { readonly: true });
-    sqliteDb.pragma("journal_mode = WAL");
   } catch {
     return [];
   }

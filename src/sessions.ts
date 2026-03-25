@@ -726,8 +726,9 @@ export function searchMemories(
 }
 
 export function deleteMemory(id: number, userId: string): boolean {
+  // Allow deletion if the user created it OR if it was created by 'agent'
   const result = getDb()
-    .prepare("DELETE FROM memories WHERE id = ? AND created_by = ?")
+    .prepare("DELETE FROM memories WHERE id = ? AND (created_by = ? OR created_by = 'agent')")
     .run(id, userId);
   return result.changes > 0;
 }

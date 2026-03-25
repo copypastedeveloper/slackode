@@ -94,7 +94,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
       return;
     }
 
-    const memoryReply = handleMemoryCommand(question, channelId, userId);
+    const memoryReply = await handleMemoryCommand(question, channelId, userId);
     if (memoryReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: memoryReply });
       return;

@@ -9,13 +9,13 @@
  */
 import {
   addMemory,
-  searchMemories,
   deleteMemory,
-  listMemories,
+  getMemoriesForContext,
   getChannelRepo,
   getDefaultRepo,
   type MemoryRow,
 } from "../sessions.js";
+import { searchMemories as vectorSearchMemories } from "../mcp/vector-store.js";
 
 function formatMemory(m: MemoryRow): string {
   const scope = m.scope_key ? `${m.scope}:${m.scope_key}` : m.scope;
@@ -31,11 +31,11 @@ function resolveRepoName(channelId: string): string | undefined {
   return defaultRepo?.name;
 }
 
-export function handleMemoryCommand(
+export async function handleMemoryCommand(
   command: string,
   channelId: string,
   userId: string,
-): string | null {
+): Promise<string | null> {
   // remember --global: <content>
   const rememberGlobal = command.match(/^remember\s+--global[:\s]\s*(.+)$/is);
   if (rememberGlobal) {
@@ -70,9 +70,15 @@ export function handleMemoryCommand(
   if (recall) {
     const query = recall[1].trim();
     if (!query) return "Please provide a search query.";
-    const results = searchMemories(query);
+    const results = await vectorSearchMemories(query);
     if (results.length === 0) return `No memories found matching "${query}".`;
-    const lines = results.map(formatMemory);
+    const lines = results.map((m) => {
+      const scope = m.scope_key ? `${m.scope}:${m.scope_key}` : m.scope;
+      const tags = m.tags ? ` [${m.tags}]` : "";
+      const date = new Date(m.created_at * 1000).toLocaleDateString();
+      const pct = (m.score * 100).toFixed(0);
+      return `\`#${m.id}\` (${scope}${tags}, ${date}, ${pct}%) ${m.content}`;
+    });
     return `*Memories matching "${query}":*\n${lines.join("\n")}`;
   }
 
@@ -88,7 +94,7 @@ export function handleMemoryCommand(
   // memories
   if (/^memories$/i.test(command.trim())) {
     const repoName = resolveRepoName(channelId);
-    const all = listMemories();
+    const all = getMemoriesForContext(repoName, channelId);
     if (all.length === 0) return "No memories saved yet. Use `remember: <content>` to save one.";
 
     const sections: string[] = [];

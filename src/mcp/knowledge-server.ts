@@ -39,9 +39,17 @@ server.tool(
   {
     query: z.string().describe("Search query — describe what you're looking for in natural language"),
     scope: z.enum(["global", "repo", "channel"]).optional().describe("Limit search to a specific scope"),
+    scope_key: z.string().optional().describe("Scope key — repo name (for repo scope) or channel ID (for channel scope). Required when scope is 'repo' or 'channel'."),
   },
-  async ({ query, scope }) => {
-    const results = await searchKnowledge(query, scope);
+  async ({ query, scope, scope_key }) => {
+    // Translate scope + scope_key to the composite scope used in LanceDB (e.g. "repo:my-app")
+    let compositeScope: string | undefined;
+    if (scope && scope_key) {
+      compositeScope = `${scope}:${scope_key}`;
+    } else if (scope === "global") {
+      compositeScope = "global";
+    }
+    const results = await searchKnowledge(query, compositeScope);
 
     if (results.length === 0) {
       return {

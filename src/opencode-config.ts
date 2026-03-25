@@ -80,8 +80,8 @@ export function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): v
       ...(process.env.SESSIONS_DB_PATH ? { SESSIONS_DB_PATH: process.env.SESSIONS_DB_PATH } : {}),
       ...(process.env.KNOWLEDGE_DIR ? { KNOWLEDGE_DIR: process.env.KNOWLEDGE_DIR } : {}),
       ...(process.env.LANCE_DIR ? { LANCE_DIR: process.env.LANCE_DIR } : {}),
-      // Model cache needs a writable dir in the read-only Docker container
-      HF_CACHE_DIR: "/home/appuser/.cache/huggingface",
+      // Model cache needs a writable dir — must match Dockerfile pre-cache path
+      HF_CACHE_DIR: "/home/appuser/.local/share/opencode/huggingface",
     },
   };
   // Enable knowledge tools globally and for each named agent
