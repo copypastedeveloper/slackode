@@ -32,8 +32,12 @@ COPY .opencode/ .opencode/
 RUN chmod +x entrypoint.sh
 
 # Create directories the app needs and give appuser ownership
-RUN mkdir -p /app/repo /app/repos /home/appuser/.local/share/opencode \
+RUN mkdir -p /app/repo /app/repos /app/knowledge /home/appuser/.local/share/opencode \
     && chown -R appuser:appuser /app /home/appuser
+
+# Pre-download the embedding model so there's no first-use latency
+ENV HF_CACHE_DIR=/home/appuser/.local/share/opencode/huggingface
+RUN node --input-type=module -e "import{pipeline,env}from'@huggingface/transformers';env.cacheDir=process.env.HF_CACHE_DIR;await pipeline('feature-extraction','Xenova/all-MiniLM-L6-v2');console.log('Model cached')"
 
 USER appuser
 CMD ["./entrypoint.sh"]

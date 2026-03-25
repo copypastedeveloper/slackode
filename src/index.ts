@@ -8,6 +8,7 @@ import { initRepos, generateContextForAllRepos } from "./repo-manager.js";
 import {
   startSessionReaper, destroyAllCodingSessions, cleanupOrphanedSessions,
 } from "./coding-session.js";
+import { syncKnowledge, startKnowledgeSync } from "./knowledge.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
@@ -20,6 +21,7 @@ const OPENCODE_URL = process.env.OPENCODE_URL ?? "http://127.0.0.1:4096";
 const REPO_DIR = process.env.REPO_DIR ?? "/app/repo";
 const TOOLS_SEED_PATH = process.env.TOOLS_SEED_PATH ?? "/app/tools.json";
 const CONTEXT_GEN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+let knowledgeSyncInterval: NodeJS.Timeout | null = null;
 
 if (!SLACK_BOT_TOKEN) {
   throw new Error("SLACK_BOT_TOKEN environment variable is required");
@@ -103,6 +105,7 @@ app.action(Action.CODING_CANCEL, async ({ action, ack, body, client }) => {
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
 
+
 /**
  * Run context generation for all repos, logging errors but never crashing the bot.
  */
@@ -132,6 +135,10 @@ async function start(): Promise<void> {
   // 5. Initialize repo manager (seeds default repo from env if needed)
   await initRepos();
 
+  // 5b. Sync knowledge files from S3 (non-blocking)
+  syncKnowledge().catch((err) => console.error("[knowledge] Initial sync error:", err));
+  knowledgeSyncInterval = startKnowledgeSync();
+
   // 6. Clean up any orphaned coding sessions from a prior crash
   cleanupOrphanedSessions();
 
@@ -152,6 +159,7 @@ async function start(): Promise<void> {
 // Graceful shutdown
 async function shutdown(): Promise<void> {
   console.log("Shutting down...");
+  if (knowledgeSyncInterval) clearInterval(knowledgeSyncInterval);
   await destroyAllCodingSessions();
   await stopServer();
   closeDb();
