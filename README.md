@@ -2,19 +2,26 @@
   <img src="assets/logo.svg" alt="Slackode" width="400">
 </p>
 
-A Slack bot that answers questions about your codebase. Point it at any git repo (GitHub, GitLab, Bitbucket, or self-hosted) and ask questions via @mentions or DMs — it uses [OpenCode](https://opencode.ai) to explore the code and respond with accurate, cited answers.
+A Slack bot that answers questions about your codebase, writes code, and accumulates institutional knowledge. Point it at any git repo (GitHub, GitLab, Bitbucket, or self-hosted) and interact via @mentions or DMs — it uses [OpenCode](https://opencode.ai) to explore code, connect to external tools, and respond with accurate, cited answers.
 
 ## How it works
 
-1. **Clones your repo** into the container and keeps it updated hourly
-2. **Generates context files** on startup by analyzing the repo structure, key abstractions, and conventions using an OpenCode agent
+1. **Clones your repo(s)** into the container and keeps them updated hourly
+2. **Generates context files** on startup by analyzing repo structure, key abstractions, and conventions
 3. **Answers questions** via Slack — @mention in a channel or DM directly. Uses OpenCode's tool-use (grep, read, glob, bash) to find answers in the actual code
-4. **Maintains conversation context** — follow-up questions in the same Slack thread share the same OpenCode session
-5. **Picks up thread context** — if you @mention the bot in an existing thread, it reads the preceding conversation so it can answer in context
-6. **Streams progress** — shows intermediate status in Slack as the agent works ("Looking into this..." -> "Using: grep, read..." -> final answer)
-7. **Tailors responses by role** — pulls your Slack profile (title, status) and channel context to adjust technical depth
+4. **Writes code** — start a coding session with `code <description>` and the bot works in an isolated git worktree, then creates a PR when done
+5. **Learns over time** — the bot has a memory system that stores conventions, decisions, and corrections. It saves important things proactively and recalls them via semantic search
+6. **Connects to external services** — plug in MCP tools (Linear, Sentry, etc.) and the bot can look up tickets, errors, and more alongside the codebase
+7. **Syncs corporate knowledge** — optionally pulls company guidelines, coding standards, and repo-specific docs from an S3-compatible bucket
 
-The bot is strictly **read-only** — it will never suggest code changes, write diffs, or offer to implement anything. It explains the current state of the codebase.
+### Q&A features
+
+- **Thread context** — follow-ups in the same thread share the same session
+- **@mention in existing threads** — reads the preceding conversation for context
+- **File attachments** — attach images (PNG, JPEG, GIF, WebP) or PDFs (up to 10 MB)
+- **Linked threads** — paste a Slack thread link and the bot fetches that conversation as context
+- **Role-aware responses** — pulls your Slack profile to adjust technical depth
+- **Progress streaming** — shows intermediate status as the agent works
 
 ## Prerequisites
 
@@ -105,17 +112,11 @@ First startup takes a few minutes — it clones the repo, starts the OpenCode se
 docker compose logs -f
 ```
 
-You'll see:
-```
-OpenCode server is ready (took 1s).
-Slack bot is running (OpenCode server: http://127.0.0.1:4096)
-[context-gen] Starting full context generation (no prior context found)...
-[context-gen] Context generation complete (full, sha: abc1234).
-```
-
 Once the bot is running, @mention it in a channel or DM it directly.
 
 ## Usage
+
+### Asking questions
 
 **In a channel:**
 ```
@@ -132,15 +133,99 @@ What Django apps handle the API layer?
 Where are the serializers for that?
 ```
 
-The bot keeps conversation context within a thread — follow-ups don't need to repeat background information.
+The bot is **read-only** in Q&A mode — it explains the current state of the codebase without suggesting changes.
 
-### File attachments
+### Coding sessions
 
-Attach images (PNG, JPEG, GIF, WebP) or PDFs (up to 10 MB each) to your message or thread — the bot includes them as context when answering. Files from all messages in the thread are collected automatically.
+Start a coding session to have the bot write code in an isolated git worktree:
 
-### Linked threads
+```
+@Slackode code add rate limiting to the /api/upload endpoint
+```
 
-Paste a Slack message or thread link in your question and the bot will fetch that conversation and include it as context (up to 3 links per message).
+The bot will:
+1. Create a worktree and branch off the latest `main`
+2. Optionally plan the changes first (if the task is complex) — you review and approve
+3. Write the code
+4. Show a summary of changes
+
+**Commands inside a coding thread:**
+- `status` — show current diff and session info
+- `pr` — create a pull request from the changes
+- `done` — create a PR and end the session
+- `cancel` — discard changes and clean up
+- `agents` — list available agent profiles
+
+You can also specify an agent: `code --agent my-agent fix the flaky test`
+
+### Multi-repo support
+
+Register additional repos and assign them to channels:
+
+```
+@Slackode repo add backend https://github.com/org/backend.git
+@Slackode repo add frontend https://github.com/org/frontend.git
+@Slackode repo list
+@Slackode repo default backend
+```
+
+Assign a repo to a channel:
+```
+@Slackode config set repo frontend
+```
+
+Questions in that channel will focus on the assigned repo. The bot can still reference other repos if asked explicitly.
+
+### Memory system
+
+The bot accumulates institutional knowledge over time — team conventions, decisions, corrections — and uses semantic search (LanceDB + local embeddings) to recall them in context.
+
+**Manual commands:**
+```
+@Slackode remember: we always use Zod for request validation, never joi
+@Slackode remember --global: all PRs need two approvals before merging
+@Slackode remember --channel: this channel is for the payments team
+@Slackode recall: validation library
+@Slackode forget: 42
+@Slackode memories
+```
+
+**Automatic saving:** The agent also saves memories proactively via its `save_memory` tool. When you correct the bot or state a convention ("actually, we use X", "we never do Y"), the agent recognizes this as worth remembering and saves it without asking.
+
+**How recall works:** Memories are embedded with a local model (all-MiniLM-L6-v2) and stored in LanceDB. When the agent needs context — or when you use `recall:` — it searches by semantic similarity, not just keywords. Searching "validation" will find a memory about "Zod" even if the word "validation" doesn't appear.
+
+**Scopes:**
+- `global` — applies everywhere
+- `repo` — applies to a specific repo (default for `remember:`)
+- `channel` — applies to a specific channel
+
+### Corporate knowledge (S3 sync)
+
+Optionally sync markdown files from an S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, etc.) to inject company-wide context:
+
+```
+your-bucket/
+  global/company.md              → injected into every new session
+  global/coding-standards.md     → searchable via agent tools
+  repos/{repo-name}/guidelines.md → repo-specific knowledge
+  channels/{channel-name}/context.md → channel-specific context
+```
+
+Global knowledge files are injected directly into the agent's prompt for new sessions. Repo and channel knowledge is searchable on demand via the agent's `search_knowledge` tool.
+
+Set the following env vars to enable:
+```env
+KNOWLEDGE_BUCKET=your-bucket-name
+KNOWLEDGE_ENDPOINT=https://s3.us-east-1.amazonaws.com  # or MinIO/R2 endpoint
+# KNOWLEDGE_PREFIX=optional/key/prefix
+# KNOWLEDGE_SYNC_INTERVAL_MS=1800000  # default: 30 min
+```
+
+### Repo-level knowledge (.opencode/rules/)
+
+Repos can check in `.opencode/rules/*.md` files — OpenCode loads them automatically as system instructions. Use this for repo-specific conventions and context that lives with the code.
+
+The filenames `repo-overview.md`, `directory-map.md`, `key-abstractions.md`, and `conventions.md` are reserved for auto-generation and will be overwritten. Use custom names for your own rules.
 
 ### Channel configuration
 
@@ -148,12 +233,12 @@ All channel configuration is done via `@bot config <command>`. Settings persist 
 
 **Custom instructions** — included with every question from this channel (max 1000 characters):
 ```
-@Slackode config set prompt Focus on the Django REST framework views and serializers. Assume the reader is familiar with DRF.
+@Slackode config set prompt Focus on the Django REST framework views and serializers.
 @Slackode config get prompt
 @Slackode config clear prompt
 ```
 
-**MCP tools** — enable external tools like Linear or Sentry for a channel (see [Adding MCP tools](#adding-mcp-tools)):
+**MCP tools** — enable external tools like Linear or Sentry for a channel:
 ```
 @Slackode config set tools linear
 @Slackode config set tools linear,sentry
@@ -162,88 +247,96 @@ All channel configuration is done via `@bot config <command>`. Settings persist 
 @Slackode config available tools
 ```
 
-**Agent override** — use a different OpenCode agent profile for a channel:
+**Repo assignment:**
+```
+@Slackode config set repo frontend
+@Slackode config get repo
+@Slackode config clear repo
+```
+
+**Agent override** — use a different OpenCode agent profile:
 ```
 @Slackode config set agent my-custom-agent
 @Slackode config get agent
 @Slackode config clear agent
 ```
 
-The bot also reads the channel topic and purpose automatically, so for lightweight hints you can just put them there.
-
 ### Tool management
 
-Manage the bot's tool registry at runtime — no code changes or restarts needed. All commands are via `@bot tool <command>`.
+Manage the bot's MCP tool registry at runtime — no code changes or restarts needed.
 
-**List registered tools:**
 ```
 @Slackode tool list
-```
-
-**Add a new tool** — starts a conversational flow that walks you through name, description, instructions, and MCP config:
-```
-@Slackode tool add my-tool
-```
-
-**Remove a tool:**
-```
+@Slackode tool add my-tool          # starts conversational setup
 @Slackode tool remove my-tool
-```
-
-**Set an API key** — stored encrypted (AES-256-GCM) in the database. The bot will remind you to delete the Slack message containing the key:
-```
 @Slackode tool set-key my-tool sk-abc123...
-```
-
-**Enable / disable a tool** without removing it:
-```
 @Slackode tool enable my-tool
 @Slackode tool disable my-tool
 ```
 
-Adding, removing, enabling, disabling, or setting a key for a tool automatically restarts the OpenCode server to pick up the changes.
+Adding, removing, enabling, disabling, or setting a key for a tool automatically restarts the OpenCode server.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│  Docker Container                           │
-│                                             │
-│  ┌──────────────┐    ┌───────────────────┐  │
-│  │  Slack Bot    │───>│  OpenCode Server  │  │
-│  │  (Node.js)   │<───│  (port 4096)      │  │
-│  └──────────────┘    └───────────────────┘  │
-│         │                     │              │
-│         v                     v              │
-│  ┌──────────────┐    ┌───────────────────┐  │
-│  │  sessions.db  │    │  Cloned Repo      │  │
-│  │  (SQLite)     │    │  + Context Files  │  │
-│  └──────────────┘    └───────────────────┘  │
-└─────────────────────────────────────────────┘
-         │                      │
-         v                      v
-    Slack API             LLM Provider API
-    (Socket Mode)         (configurable)
+┌──────────────────────────────────────────────────────────┐
+│  Docker Container                                        │
+│                                                          │
+│  ┌──────────────┐    ┌──────────────────┐                │
+│  │  Slack Bot    │───>│  OpenCode Server │ (Q&A, port    │
+│  │  (Node.js)   │<───│  (port 4096)     │  4100+ for    │
+│  └──────────────┘    └──────────────────┘  coding)       │
+│     │    │                  │                             │
+│     │    │    ┌─────────────┼──────────────┐              │
+│     │    │    │             │              │              │
+│     v    │    v             v              v              │
+│  ┌─────┐ │ ┌──────┐  ┌──────────┐  ┌───────────────┐    │
+│  │SQLite│ │ │Lance │  │ Repos    │  │ Knowledge MCP │    │
+│  │  DB  │ │ │  DB  │  │ + Rules  │  │ Server (stdio)│    │
+│  └─────┘ │ └──────┘  └──────────┘  └───────────────┘    │
+│          │                               │               │
+│          │    ┌──────────────────┐        │               │
+│          └───>│  S3 Knowledge    │<───────┘               │
+│               │  Sync (periodic) │                        │
+│               └──────────────────┘                        │
+└──────────────────────────────────────────────────────────┘
+       │              │                    │
+       v              v                    v
+  Slack API     LLM Provider API     S3 Bucket
+  (Socket Mode) (configurable)       (optional)
 ```
 
-- **Slack Bot** — Bolt for JavaScript with Socket Mode. Handles @mentions and DMs, manages thread-to-session mapping in SQLite, streams progress updates.
-- **OpenCode Server** — runs inside the container, provides the agent runtime with tools (bash, read, grep, glob) and optional MCP servers. Agents: `build` (read-only Q&A, default), `context` (generates reference docs), and `build-<tools>` variants for channels with MCP tools enabled.
-- **Context Files** — auto-generated on startup and refreshed hourly. Provide the LLM with a pre-built understanding of the repo structure, key abstractions, and conventions so it can answer faster and more accurately.
+**Core components:**
+
+- **Slack Bot** — Bolt for JavaScript with Socket Mode. Handles @mentions, DMs, coding sessions, config/tool/repo/memory commands. Manages sessions in SQLite.
+- **OpenCode Server** — Agent runtime with tools (bash, read, grep, glob) and MCP servers. Multiple instances: one for Q&A (port 4096), one per active coding session (ports 4100+).
+- **Knowledge MCP Server** — Local stdio-based MCP server exposing `search_knowledge`, `recall_memories`, and `save_memory` tools. Registered automatically in all agents.
+- **SQLite** — Source of truth for sessions, channel config, tools, repos, and memories.
+- **LanceDB** — Vector search index for semantic memory/knowledge retrieval. Embedded, on-disk, no server needed.
+- **S3 Sync** — Optional periodic sync of markdown knowledge files from an S3-compatible bucket.
+
+**Agent types:**
+- `build` — Read-only Q&A (default)
+- `build-<tools>` — Q&A with MCP tools (e.g. `build-linear-sentry`)
+- `code` — Code-writing agent (used in coding sessions)
+- `context` — Generates repo context files
+- `enrich` — Fetches external context for coding sessions (tickets, errors)
+- `knowledge` — MCP server providing knowledge/memory tools (available to all agents)
 
 ## Adding MCP tools
 
-Slackode can connect to external services via [MCP servers](https://modelcontextprotocol.io/) and expose them per-channel. Tools are stored in SQLite and can be managed entirely from Slack (see [Tool management](#tool-management)).
+Slackode connects to external services via [MCP servers](https://modelcontextprotocol.io/). Tools are stored in SQLite and managed from Slack.
 
 ### Built-in tools
 
-On first boot, Slackode seeds the database from `tools.json`. The default seed includes:
+On first boot, Slackode seeds from `tools.json`:
 
 | Tool | Service |
 |------|---------|
 | `linear` | [Linear](https://linear.app) issue tracking |
 | `sentry` | [Sentry](https://sentry.io) error monitoring |
 
-To activate a built-in tool, set its API key and assign it to a channel:
+To activate:
 ```
 @Slackode tool set-key linear <your-api-key>
 @Slackode config set tools linear
@@ -251,25 +344,24 @@ To activate a built-in tool, set its API key and assign it to a channel:
 
 ### Adding a new tool
 
-The easiest way is the conversational `tool add` command from Slack — it walks you through each field. You can also seed tools by adding entries to `tools.json` before first boot:
+Use `tool add` from Slack (walks you through each field), or add entries to `tools.json` before first boot:
 
 ```json
 {
   "my-tool": {
-    "description": "Short description shown in 'tool list' and 'config available tools'",
-    "instruction": "Prompt instructions telling the agent when and how to use this tool",
+    "description": "Short description shown in tool list",
+    "instruction": "Prompt instructions for when and how to use this tool",
     "env": "MY_TOOL_API_KEY",
     "mcp": {
       "type": "remote",
       "url": "https://example.com/mcp",
-      "headerAuth": "Bearer",
-      "oauth": false
+      "headerAuth": "Bearer"
     }
   }
 }
 ```
 
-For local MCP servers (run as a subprocess instead of connecting to a remote URL):
+For local MCP servers:
 ```json
 {
   "mcp": {
@@ -280,8 +372,6 @@ For local MCP servers (run as a subprocess instead of connecting to a remote URL
 }
 ```
 
-Once a tool is registered and has an API key, the bot automatically generates OpenCode agent variants so each channel gets only the tools assigned to it.
-
 ## Configuration
 
 | Env var | Required | Description |
@@ -289,18 +379,22 @@ Once a tool is registered and has an API key, the bot automatically generates Op
 | `SLACK_BOT_TOKEN` | Yes | Bot User OAuth Token (`xoxb-...`) |
 | `SLACK_APP_TOKEN` | Yes | App-Level Token with `connections:write` (`xapp-...`) |
 | `REPO_URL` | Yes | Git repo URL (e.g. `https://github.com/org/repo.git`) |
-| `GIT_TOKEN` | For private repos | PAT with repo read access (any provider) |
+| `GIT_TOKEN` | For private repos | PAT with repo read access |
 | `TARGET_REPO` | No | Display name override (derived from `REPO_URL` if not set) |
 | `PROVIDER` | No | LLM provider (default: `github-copilot`) |
 | `MODEL` | No | Model ID (default: `claude-sonnet-4.6`) |
 | `COPILOT_TOKEN` | For github-copilot | GitHub Copilot OAuth token (`gho_...`) |
-| `CONFIG_ENCRYPTION_KEY` | No | 64-char hex key for AES-256-GCM encryption of tool API keys. Omit for plaintext (dev mode) |
+| `CONFIG_ENCRYPTION_KEY` | No | 64-char hex key for AES-256-GCM encryption of tool API keys |
+| `KNOWLEDGE_BUCKET` | No | S3 bucket name for corporate knowledge sync |
+| `KNOWLEDGE_ENDPOINT` | No | S3-compatible endpoint URL (for MinIO, R2, etc.) |
+| `KNOWLEDGE_PREFIX` | No | Key prefix within the bucket |
+| `KNOWLEDGE_SYNC_INTERVAL_MS` | No | Sync interval in ms (default: 1800000 / 30 min) |
 | `OPENCODE_URL` | No | OpenCode server URL (default: `http://127.0.0.1:4096`) |
-| `SESSIONS_DB_PATH` | No | Path to sessions SQLite DB (default: `./sessions.db`) |
+| `SESSIONS_DB_PATH` | No | Path to sessions SQLite DB |
 
 ### Providers
 
-Slackode uses [OpenCode](https://opencode.ai) under the hood, which supports many LLM providers. Set `PROVIDER` and `MODEL` in your `.env` along with the provider's API key:
+Slackode uses [OpenCode](https://opencode.ai) under the hood, which supports many LLM providers:
 
 | Provider | `PROVIDER` | Example `MODEL` | Required env var |
 |----------|-----------|-----------------|-----------------|
@@ -310,23 +404,19 @@ Slackode uses [OpenCode](https://opencode.ai) under the hood, which supports man
 | Amazon Bedrock | `amazon-bedrock` | `us.anthropic.claude-sonnet-4-5-v2-20250514` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
 | OpenRouter | `openrouter` | `anthropic/claude-sonnet-4` | `OPENROUTER_API_KEY` |
 | Google Vertex AI | `google-vertex-ai` | `claude-sonnet-4-5` | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS` |
-| Groq | `groq` | `llama-3.3-70b-versatile` | `GROQ_API_KEY` |
-| DeepSeek | `deepseek` | `deepseek-chat` | `DEEPSEEK_API_KEY` |
 
-For the full list of providers and models, see the [OpenCode providers docs](https://opencode.ai/docs/providers).
+For the full list, see the [OpenCode providers docs](https://opencode.ai/docs/providers).
 
 ## Volumes
 
-Docker Compose mounts two named volumes for persistence across restarts:
-
 | Volume | Container path | Purpose |
 |--------|---------------|---------|
-| `repo-cache` | `/app/repo` | Cloned repo (avoids re-clone on restart) |
-| `opencode-data` | `/home/appuser/.local/share/opencode` | OpenCode state + bot sessions DB |
+| `repo-cache` | `/app/repo` | Default cloned repo |
+| `repos-cache` | `/app/repos` | Additional repos (multi-repo) |
+| `opencode-data` | `/home/appuser/.local/share/opencode` | OpenCode state + sessions DB |
+| `knowledge-cache` | `/app/knowledge` | S3-synced knowledge files + LanceDB vector index |
 
 ## Development
-
-To work on the bot code locally (the bot still runs inside Docker):
 
 ```bash
 npm install
@@ -334,25 +424,38 @@ npm run build
 docker compose up --build
 ```
 
-The TypeScript source is in `src/`:
+Source layout:
 
 ```
 src/
-├── index.ts              # Bolt app setup, Socket Mode, context gen scheduling
-├── opencode.ts           # OpenCode SDK client, streaming, session management
+├── index.ts              # Bolt app, Socket Mode, action handlers, startup
+├── opencode.ts           # OpenCode SDK client, SSE streaming, session mgmt
 ├── opencode-config.ts    # Generates opencode.json from DB (agents, MCP, tools)
-├── opencode-server.ts    # Spawns/stops/restarts the OpenCode server process
-├── context-gen.ts        # Auto-generates repo context files (overview, map, etc.)
-├── sessions.ts           # SQLite persistence (sessions, channels, tools)
-├── tools.ts              # Tool registry helpers (getKnownTools, getToolInstructions)
+├── opencode-server.ts    # Spawns/stops/restarts OpenCode server processes
+├── context-gen.ts        # Auto-generates repo context files
+├── context-prefix.ts     # Builds mode-specific system prompts (Q&A, coding, planning)
+├── sessions.ts           # SQLite schema + CRUD (sessions, channels, tools, repos, memories)
+├── knowledge.ts          # S3 knowledge sync + file reading
+├── tools.ts              # Tool registry helpers
 ├── crypto.ts             # AES-256-GCM encrypt/decrypt for tool API keys
+├── coding-session.ts     # Worktree management, PR creation, session lifecycle
+├── repo-manager.ts       # Multi-repo clone, pull, context generation
+├── constants.ts          # Action IDs, ports, timeouts
 ├── handlers/
-│   ├── mention.ts        # @mention preprocessing, config/tool command routing
+│   ├── shared.ts         # Shared Q&A pipeline (session mgmt, progress, formatting)
+│   ├── mention.ts        # @mention preprocessing and command routing
 │   ├── dm.ts             # DM preprocessing
-│   ├── shared.ts         # Shared Q&A pipeline (askQuestion, progress, formatting)
-│   └── tool-commands.ts  # `tool add/remove/list/set-key/enable/disable` state machine
+│   ├── config-commands.ts # config set/get/clear for agent, tools, prompt, repo
+│   ├── tool-commands.ts  # tool add/remove/list/set-key/enable/disable
+│   ├── repo-commands.ts  # repo add/remove/list/default/pull
+│   ├── code-commands.ts  # Coding thread commands (status, pr, done, cancel)
+│   ├── coding-handler.ts # Coding session orchestration (plan, approve, execute)
+│   └── memory-commands.ts # remember/recall/forget/memories
+├── mcp/
+│   ├── knowledge-server.ts # MCP server: search_knowledge, recall_memories, save_memory
+│   └── vector-store.ts    # LanceDB vector index + local embeddings (all-MiniLM-L6-v2)
 └── utils/
-    ├── formatting.ts     # Markdown -> Slack Block Kit conversion (tables, rich text)
+    ├── formatting.ts     # Markdown → Slack Block Kit conversion
     ├── slack-context.ts  # Fetches user/channel info from Slack API
     ├── slack-files.ts    # Slack file download + base64 data URI conversion
     └── progress.ts       # Throttled Slack message updater
@@ -360,22 +463,23 @@ src/
 
 ## Security
 
-Slackode is designed to be safe to deploy on a shared network. The following measures are in place:
-
 **Container isolation**
-- Runs as a non-root user (`appuser`) inside the container
-- Filesystem is mounted read-only (`read_only: true`) with explicit tmpfs mounts for `/tmp` and runtime directories
-- The OpenCode server binds to `127.0.0.1:4096` — not accessible outside the container
+- Runs as non-root (`appuser`) with a read-only filesystem
+- Explicit tmpfs mounts for `/tmp` and runtime directories
+- OpenCode servers bind to `127.0.0.1` — not accessible outside the container
+- Coding sessions use isolated git worktrees
 
 **Credential handling**
-- Git credentials are supplied via `GIT_ASKPASS` — they never appear in the repo URL, `ps` output, or `.git/config`
-- Copilot auth (when using `github-copilot` provider) is written with `printf` to avoid shell interpretation of special characters
-- Other providers use standard API key env vars passed directly to the container
-- Tool API keys stored in SQLite are encrypted with AES-256-GCM when `CONFIG_ENCRYPTION_KEY` is set. Without it, keys are stored in plaintext (suitable for local development only)
+- Git credentials supplied via `GIT_ASKPASS` — never in URLs or `.git/config`
+- Tool API keys encrypted with AES-256-GCM when `CONFIG_ENCRYPTION_KEY` is set
+- Copilot auth written with `printf` to avoid shell interpretation
 
 **Input validation**
-- `REPO_URL` is validated on startup; `TARGET_REPO` display name is derived automatically
-- User questions are wrapped in `<user_question>` delimiter tags with explicit anti-injection instructions so the LLM treats them as opaque questions, not directives
+- User questions wrapped in `<user_question>` tags with anti-injection instructions
+- The agent treats tag contents as opaque data, not directives
+
+**Embedding model**
+- Runs locally (all-MiniLM-L6-v2, 22MB) — no data sent to external embedding APIs
 
 ## License
 

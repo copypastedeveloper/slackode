@@ -10,6 +10,10 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1016.0",
+    "@huggingface/transformers": "^3.8.1",
+    "@lancedb/lancedb": "^0.27.1",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@opencode-ai/sdk": "^1.2.10",
     "@slack/bolt": "^4.6.0",
     "better-sqlite3": "^12.6.2",

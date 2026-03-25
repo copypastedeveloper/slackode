@@ -110,6 +110,21 @@ function getDb(): Database.Database {
         last_activity_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        content TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'repo',
+        scope_key TEXT,
+        tags TEXT,
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope, scope_key)
+    `);
   }
   return db;
 }
@@ -627,6 +642,110 @@ export function getIdleCodingSessions(maxIdleSeconds: number): CodingSessionRow[
       `SELECT * FROM coding_sessions WHERE status IN (${REAPABLE_STATUSES.map((s) => `'${s}'`).join(",")}) AND (unixepoch() - last_activity_at) > ?`
     )
     .all(maxIdleSeconds) as CodingSessionRow[];
+}
+
+// ── Memory management ──
+
+export interface MemoryRow {
+  id: number;
+  content: string;
+  scope: string;
+  scope_key: string | null;
+  tags: string | null;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export function addMemory(
+  content: string,
+  scope: "global" | "repo" | "channel",
+  scopeKey: string | null,
+  tags: string | null,
+  createdBy: string,
+): number {
+  const result = getDb()
+    .prepare(
+      "INSERT INTO memories (content, scope, scope_key, tags, created_by) VALUES (?, ?, ?, ?, ?)"
+    )
+    .run(content, scope, scopeKey, tags, createdBy);
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * Get memories relevant to a given context (repo + channel).
+ * Returns global + matching repo + matching channel memories, ordered by recency.
+ */
+export function getMemoriesForContext(
+  repoName?: string,
+  channelId?: string,
+  limit = 20,
+): MemoryRow[] {
+  const conditions: string[] = ["scope = 'global'"];
+  const params: unknown[] = [];
+
+  if (repoName) {
+    conditions.push("(scope = 'repo' AND scope_key = ?)");
+    params.push(repoName);
+  }
+  if (channelId) {
+    conditions.push("(scope = 'channel' AND scope_key = ?)");
+    params.push(channelId);
+  }
+
+  const where = conditions.join(" OR ");
+  return getDb()
+    .prepare(`SELECT * FROM memories WHERE ${where} ORDER BY updated_at DESC LIMIT ?`)
+    .all(...params, limit) as MemoryRow[];
+}
+
+/**
+ * Search memories by keyword (LIKE-based).
+ */
+export function searchMemories(
+  query: string,
+  scope?: string,
+  scopeKey?: string,
+): MemoryRow[] {
+  const conditions = ["(content LIKE ? OR tags LIKE ?)"];
+  const params: unknown[] = [`%${query}%`, `%${query}%`];
+
+  if (scope) {
+    conditions.push("scope = ?");
+    params.push(scope);
+  }
+  if (scopeKey) {
+    conditions.push("scope_key = ?");
+    params.push(scopeKey);
+  }
+
+  const where = conditions.join(" AND ");
+  return getDb()
+    .prepare(`SELECT * FROM memories WHERE ${where} ORDER BY updated_at DESC LIMIT 20`)
+    .all(...params) as MemoryRow[];
+}
+
+export function deleteMemory(id: number, userId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM memories WHERE id = ? AND created_by = ?")
+    .run(id, userId);
+  return result.changes > 0;
+}
+
+export function listMemories(scope?: string, scopeKey?: string): MemoryRow[] {
+  if (scope && scopeKey) {
+    return getDb()
+      .prepare("SELECT * FROM memories WHERE scope = ? AND scope_key = ? ORDER BY updated_at DESC")
+      .all(scope, scopeKey) as MemoryRow[];
+  }
+  if (scope) {
+    return getDb()
+      .prepare("SELECT * FROM memories WHERE scope = ? ORDER BY updated_at DESC")
+      .all(scope) as MemoryRow[];
+  }
+  return getDb()
+    .prepare("SELECT * FROM memories ORDER BY updated_at DESC LIMIT 50")
+    .all() as MemoryRow[];
 }
 
 /**

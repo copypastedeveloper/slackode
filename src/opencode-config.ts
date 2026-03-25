@@ -70,6 +70,29 @@ export function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): v
     config.tools[`${tool.name}*`] = false;
   }
 
+  // Always register the built-in knowledge MCP server (local stdio, no API key needed).
+  config.mcp = config.mcp || {};
+  config.mcp.knowledge = {
+    type: "local",
+    command: ["node", "dist/mcp/knowledge-server.js"],
+    enabled: true,
+    environment: {
+      ...(process.env.SESSIONS_DB_PATH ? { SESSIONS_DB_PATH: process.env.SESSIONS_DB_PATH } : {}),
+      ...(process.env.KNOWLEDGE_DIR ? { KNOWLEDGE_DIR: process.env.KNOWLEDGE_DIR } : {}),
+      ...(process.env.LANCE_DIR ? { LANCE_DIR: process.env.LANCE_DIR } : {}),
+      // Model cache needs a writable dir in the read-only Docker container
+      HF_CACHE_DIR: "/home/appuser/.cache/huggingface",
+    },
+  };
+  // Enable knowledge tools globally and for each named agent
+  config.tools["knowledge*"] = true;
+  for (const agentName of Object.keys(config.agent)) {
+    if (config.agent[agentName].tools) {
+      config.agent[agentName].tools["knowledge*"] = true;
+    }
+  }
+  console.log("[config] Knowledge MCP server configured.");
+
   if (enabled.length === 0) {
     console.log("[config] No tool API keys configured.");
   } else {

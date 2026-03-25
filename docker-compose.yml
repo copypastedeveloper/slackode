@@ -6,10 +6,18 @@ services:
       - repo-cache:/app/repo
       - repos-cache:/app/repos
       - opencode-data:/home/appuser/.local/share/opencode
+      - knowledge-cache:/app/knowledge
     environment:
       - SESSIONS_DB_PATH=/home/appuser/.local/share/opencode/sessions.db
       - REPO_DIR=/app/repo
       - TOOLS_SEED_PATH=/app/tools.json
+      - KNOWLEDGE_DIR=/app/knowledge
+      - LANCE_DIR=/app/knowledge/.lancedb
+      # S3 knowledge sync (optional — set in .env)
+      # - KNOWLEDGE_BUCKET=
+      # - KNOWLEDGE_ENDPOINT=
+      # - KNOWLEDGE_PREFIX=
+      # - KNOWLEDGE_SYNC_INTERVAL_MS=1800000
     read_only: true
     tmpfs:
       - /tmp:size=2G,exec,uid=1001,gid=1001
@@ -24,3 +32,4 @@ volumes:
   repo-cache:
   repos-cache:
   opencode-data:
+  knowledge-cache:

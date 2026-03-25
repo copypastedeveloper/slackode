@@ -21,6 +21,7 @@ import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
 import { handleRepoCommand } from "./repo-commands.js";
 import { handleCodeCommand } from "./code-commands.js";
 import { handleCodingMessage, handleCodeStart } from "./coding-handler.js";
+import { handleMemoryCommand } from "./memory-commands.js";
 
 // ── processIncoming: shared pipeline for DMs and mentions ──
 
@@ -90,6 +91,12 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     const repoReply = await handleRepoCommand(question, channelId, userId, threadTs, client);
     if (repoReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: repoReply });
+      return;
+    }
+
+    const memoryReply = handleMemoryCommand(question, channelId, userId);
+    if (memoryReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: memoryReply });
       return;
     }
   }
