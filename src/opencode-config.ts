@@ -85,7 +85,12 @@ export function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): v
       config.agent[agentName] = {
         description: `${buildAgent.description} with ${subset.join(", ")} tools`,
         tools: { ...buildAgent.tools, ...toolOverrides },
-        permission: { ...buildAgent.permission },
+        permission: {
+          ...buildAgent.permission,
+          external_directory: {
+            "/app/repos/*": "allow",
+          },
+        },
       };
     }
     console.log(`[config] Generated agent variants for: ${enabled.join(", ")}`);
