@@ -176,16 +176,16 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     }
 
     // ── Knowledge commands (admin-only for mutations, open for list/view) ──
-    if (/^knowledge\s+/i.test(question) && !/^knowledge\s+(list|view)\b/i.test(question)) {
-      if (!hasRole(userId, "admin")) {
+    if (/^knowledge\s+/i.test(question)) {
+      if (!/^knowledge\s+(list|view)\b/i.test(question) && !hasRole(userId, "admin")) {
         await denyAccess(client, channelId, userId, threadTs, "admin");
         return;
       }
-    }
-    const knowledgeReply = handleKnowledgeCommand(question, channelId, userId);
-    if (knowledgeReply) {
-      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: knowledgeReply });
-      return;
+      const knowledgeReply = handleKnowledgeCommand(question, channelId, userId);
+      if (knowledgeReply) {
+        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: knowledgeReply });
+        return;
+      }
     }
   }
 
