@@ -181,11 +181,13 @@ async function start(): Promise<void> {
   // 8. Start coding session idle reaper (every 5 min)
   const reaperInterval = startSessionReaper();
 
-  // Generate context files on startup (non-blocking — bot is already serving)
-  runContextGeneration();
-
-  // Regenerate context every hour
-  setInterval(runContextGeneration, CONTEXT_GEN_INTERVAL_MS);
+  // Generate context files after a delay so startup Q&A isn't rate-limited
+  const CONTEXT_GEN_STARTUP_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+  setTimeout(() => {
+    runContextGeneration();
+    // Regenerate context every hour after the first run
+    setInterval(runContextGeneration, CONTEXT_GEN_INTERVAL_MS);
+  }, CONTEXT_GEN_STARTUP_DELAY_MS);
 }
 
 // Graceful shutdown
