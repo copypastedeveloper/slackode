@@ -15,7 +15,7 @@ import { resolveRepoForChannel } from "../repo-manager.js";
 import { getActiveCodingSession } from "../coding-session.js";
 import { formatResponse } from "../utils/formatting.js";
 import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
-import { downloadFiles, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
+import { downloadFiles, TEXT_MIMES, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
 import { handleConfigCommand } from "./config-commands.js";
 import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
@@ -25,6 +25,7 @@ import { handleGithubCommand } from "./github-commands.js";
 import { handleCodeCommand } from "./code-commands.js";
 import { handleCodingMessage, handleCodeStart } from "./coding-handler.js";
 import { handleMemoryCommand } from "./memory-commands.js";
+import { handleKnowledgeCommand, type KnowledgeImportFile } from "./knowledge-commands.js";
 
 /** Send an ephemeral denial message visible only to the requesting user. */
 async function denyAccess(
@@ -81,6 +82,27 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
   // ── Command routing (skip when files are attached) ──
   const channelName = channelType === "dm" ? "DM" : undefined;
   const slackCtx = await getSlackContext(client, userId, channelId, channelType);
+
+  // ── Knowledge import with attached files (must be before !hasFiles guard) ──
+  if (hasFiles && question && /^knowledge\s+import/i.test(question)) {
+    if (!hasRole(userId, "admin")) {
+      await denyAccess(client, channelId, userId, threadTs, "admin");
+      return;
+    }
+    const downloaded = await downloadFiles(eventFiles, client, TEXT_MIMES);
+    const mdFiles: KnowledgeImportFile[] = downloaded
+      .filter((f) => f.filename.endsWith(".md"))
+      .map((f) => ({
+        filename: f.filename,
+        content: Buffer.from(f.dataUri.split(",")[1], "base64").toString("utf-8"),
+      }));
+    const reply = handleKnowledgeCommand(question, channelId, userId, mdFiles);
+    await client.chat.postMessage({
+      channel: channelId, thread_ts: threadTs,
+      text: reply || "No `.md` files found in the attachments.",
+    });
+    return;
+  }
 
   if (!hasFiles && question) {
     // ── Admin-only: tool commands (except "tool list") ──
@@ -150,6 +172,19 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     const memoryReply = await handleMemoryCommand(question, channelId, userId);
     if (memoryReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: memoryReply });
+      return;
+    }
+
+    // ── Knowledge commands (admin-only for mutations, open for list/view) ──
+    if (/^knowledge\s+/i.test(question) && !/^knowledge\s+(list|view)\b/i.test(question)) {
+      if (!hasRole(userId, "admin")) {
+        await denyAccess(client, channelId, userId, threadTs, "admin");
+        return;
+      }
+    }
+    const knowledgeReply = handleKnowledgeCommand(question, channelId, userId);
+    if (knowledgeReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: knowledgeReply });
       return;
     }
   }
