@@ -779,54 +779,12 @@ export function getMemoriesForContext(
     .all(...params, limit) as MemoryRow[];
 }
 
-/**
- * Search memories by keyword (LIKE-based).
- */
-export function searchMemories(
-  query: string,
-  scope?: string,
-  scopeKey?: string,
-): MemoryRow[] {
-  const conditions = ["(content LIKE ? OR tags LIKE ?)"];
-  const params: unknown[] = [`%${query}%`, `%${query}%`];
-
-  if (scope) {
-    conditions.push("scope = ?");
-    params.push(scope);
-  }
-  if (scopeKey) {
-    conditions.push("scope_key = ?");
-    params.push(scopeKey);
-  }
-
-  const where = conditions.join(" AND ");
-  return getDb()
-    .prepare(`SELECT * FROM memories WHERE ${where} ORDER BY updated_at DESC LIMIT 20`)
-    .all(...params) as MemoryRow[];
-}
-
 export function deleteMemory(id: number, userId: string): boolean {
   // Allow deletion if the user created it OR if it was created by 'agent'
   const result = getDb()
     .prepare("DELETE FROM memories WHERE id = ? AND (created_by = ? OR created_by = 'agent')")
     .run(id, userId);
   return result.changes > 0;
-}
-
-export function listMemories(scope?: string, scopeKey?: string): MemoryRow[] {
-  if (scope && scopeKey) {
-    return getDb()
-      .prepare("SELECT * FROM memories WHERE scope = ? AND scope_key = ? ORDER BY updated_at DESC")
-      .all(scope, scopeKey) as MemoryRow[];
-  }
-  if (scope) {
-    return getDb()
-      .prepare("SELECT * FROM memories WHERE scope = ? ORDER BY updated_at DESC")
-      .all(scope) as MemoryRow[];
-  }
-  return getDb()
-    .prepare("SELECT * FROM memories ORDER BY updated_at DESC LIMIT 50")
-    .all() as MemoryRow[];
 }
 
 /**
