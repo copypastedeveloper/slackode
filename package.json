@@ -10,7 +10,6 @@
     "dev": "tsx src/index.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.1016.0",
     "@huggingface/transformers": "^3.8.1",
     "@lancedb/lancedb": "^0.27.1",
     "@modelcontextprotocol/sdk": "^1.27.1",

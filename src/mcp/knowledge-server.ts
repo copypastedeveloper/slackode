@@ -3,7 +3,7 @@
  * Local MCP server for knowledge and memory search.
  *
  * Exposes three tools the OpenCode agent can call on demand:
- *   - search_knowledge: semantic search across S3-synced knowledge files
+ *   - search_knowledge: semantic search across DB-backed knowledge entries
  *   - recall_memories: semantic search across saved memories
  *   - save_memory: save new memories (conventions, corrections, decisions)
  *
@@ -22,6 +22,7 @@ import {
   searchMemories,
   getRecentMemories,
   indexSingleMemory,
+  startKnowledgeIndexSync,
 } from "./vector-store.js";
 
 const DB_PATH = process.env.SESSIONS_DB_PATH ?? path.join(process.cwd(), "sessions.db");
@@ -42,6 +43,7 @@ server.tool(
     scope_key: z.string().optional().describe("Scope key — repo name (for repo scope) or channel ID (for channel scope). Required when scope is 'repo' or 'channel'."),
   },
   async ({ query, scope, scope_key }) => {
+    console.error(`[knowledge-mcp] search_knowledge: query="${query}" scope=${scope ?? "all"} scope_key=${scope_key ?? "none"}`);
     // Translate scope + scope_key to the composite scope used in LanceDB (e.g. "repo:my-app")
     let compositeScope: string | undefined;
     if (scope && scope_key) {
@@ -50,6 +52,8 @@ server.tool(
       compositeScope = "global";
     }
     const results = await searchKnowledge(query, compositeScope);
+
+    console.error(`[knowledge-mcp] search_knowledge: ${results.length} results`);
 
     if (results.length === 0) {
       return {
@@ -170,6 +174,7 @@ server.tool(
 // ── Start server ──
 
 async function main() {
+  startKnowledgeIndexSync();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

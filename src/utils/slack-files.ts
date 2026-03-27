@@ -21,7 +21,8 @@ export interface ConvertedFile {
   sizeBytes: number;
 }
 
-const SUPPORTED_MIMES = new Set([
+/** Default MIME types accepted for model-facing file attachments. */
+export const MODEL_MIMES = new Set([
   "image/png",
   "image/jpeg",
   "image/gif",
@@ -29,14 +30,20 @@ const SUPPORTED_MIMES = new Set([
   "application/pdf",
 ]);
 
+/** MIME types for text/markdown file imports. */
+export const TEXT_MIMES = new Set([
+  "text/plain",
+  "text/markdown",
+]);
+
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 /**
- * Filter files to only those we can send to the model (supported MIME + size limit).
+ * Filter files by an allowed MIME set and size limit.
  */
-function filterSupportedFiles(files: SlackFile[]): SlackFile[] {
+function filterFiles(files: SlackFile[], allowedMimes: Set<string>): SlackFile[] {
   return files.filter((f) => {
-    if (!SUPPORTED_MIMES.has(f.mimetype)) {
+    if (!allowedMimes.has(f.mimetype)) {
       console.warn(`Skipping unsupported file type: ${f.name} (${f.mimetype})`);
       return false;
     }
@@ -124,14 +131,15 @@ async function downloadAsDataUri(file: SlackFile, client: WebClient): Promise<Co
 }
 
 /**
- * Download all supported Slack file attachments as data URIs.
- * Filters by MIME type and size, downloads sequentially, catches per-file errors.
+ * Download Slack file attachments as data URIs.
+ * Filters by allowed MIME types (defaults to model-facing types) and size limit.
  */
 export async function downloadFiles(
   files: SlackFile[],
-  client: WebClient
+  client: WebClient,
+  allowedMimes: Set<string> = MODEL_MIMES,
 ): Promise<ConvertedFile[]> {
-  const supported = filterSupportedFiles(files);
+  const supported = filterFiles(files, allowedMimes);
   if (supported.length === 0) return [];
 
   const results: ConvertedFile[] = [];
@@ -145,3 +153,4 @@ export async function downloadFiles(
   }
   return results;
 }
+

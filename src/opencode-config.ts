@@ -74,7 +74,7 @@ export function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): v
   config.mcp = config.mcp || {};
   config.mcp.knowledge = {
     type: "local",
-    command: ["node", "dist/mcp/knowledge-server.js"],
+    command: ["node", "/app/dist/mcp/knowledge-server.js"],
     enabled: true,
     environment: {
       ...(process.env.SESSIONS_DB_PATH ? { SESSIONS_DB_PATH: process.env.SESSIONS_DB_PATH } : {}),

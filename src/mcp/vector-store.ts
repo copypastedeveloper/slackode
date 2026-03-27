@@ -7,7 +7,6 @@
 import * as lancedb from "@lancedb/lancedb";
 import { pipeline, env as txEnv, type FeatureExtractionPipeline } from "@huggingface/transformers";
 import Database from "better-sqlite3";
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
 
 // Point the model cache at a writable location (Docker has read-only node_modules)
@@ -15,12 +14,8 @@ if (process.env.HF_CACHE_DIR) {
   txEnv.cacheDir = process.env.HF_CACHE_DIR;
 }
 
-const LANCE_DIR = process.env.LANCE_DIR ?? path.join(
-  process.env.KNOWLEDGE_DIR ?? "/app/knowledge",
-  ".lancedb",
-);
-const KNOWLEDGE_DIR = process.env.KNOWLEDGE_DIR ?? "/app/knowledge";
 const DB_PATH = process.env.SESSIONS_DB_PATH ?? path.join(process.cwd(), "sessions.db");
+const LANCE_DIR = process.env.LANCE_DIR ?? path.join(path.dirname(DB_PATH), ".lancedb");
 
 const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
 const EMBEDDING_DIMS = 384;
@@ -102,56 +97,83 @@ function chunkText(text: string, maxChunkLen = 500): string[] {
   return chunks;
 }
 
-/** Scan knowledge dir and return all file entries with content. */
-function scanKnowledgeFiles(): Array<{ scope: string; file: string; content: string; mtime: number }> {
-  const entries: Array<{ scope: string; file: string; content: string; mtime: number }> = [];
+interface KnowledgeDbRow {
+  id: number;
+  title: string;
+  content: string;
+  scope: string;
+  scope_key: string | null;
+  updated_at: number;
+}
 
-  const scanDir = (dir: string, scope: string) => {
-    if (!existsSync(dir)) return;
-    try {
-      for (const file of readdirSync(dir).filter((f) => f.endsWith(".md"))) {
-        const fullPath = path.join(dir, file);
-        const stat = statSync(fullPath);
-        const content = readFileSync(fullPath, "utf-8").trim();
-        if (content) entries.push({ scope, file, content, mtime: stat.mtimeMs });
-      }
-    } catch { /* ignore */ }
-  };
-
-  scanDir(path.join(KNOWLEDGE_DIR, "global"), "global");
-
-  const reposDir = path.join(KNOWLEDGE_DIR, "repos");
-  if (existsSync(reposDir)) {
-    for (const entry of readdirSync(reposDir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        scanDir(path.join(reposDir, entry.name), `repo:${entry.name}`);
-      }
-    }
+/** Scan knowledge entries from SQLite. */
+function scanKnowledgeFromDb(): Array<{ scope: string; file: string; content: string; mtime: number }> {
+  let sqliteDb: Database.Database;
+  try {
+    sqliteDb = new Database(DB_PATH, { readonly: true });
+  } catch {
+    return [];
   }
 
-  const channelsDir = path.join(KNOWLEDGE_DIR, "channels");
-  if (existsSync(channelsDir)) {
-    for (const entry of readdirSync(channelsDir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        scanDir(path.join(channelsDir, entry.name), `channel:${entry.name}`);
-      }
-    }
-  }
+  try {
+    const rows = sqliteDb
+      .prepare("SELECT id, title, content, scope, scope_key, updated_at FROM knowledge")
+      .all() as KnowledgeDbRow[];
 
-  return entries;
+    return rows
+      .filter((r) => r.content.trim())
+      .map((r) => {
+        const compositeScope = r.scope_key ? `${r.scope}:${r.scope_key}` : r.scope;
+        return {
+          scope: compositeScope,
+          file: r.title,
+          content: r.content.trim(),
+          mtime: r.updated_at,
+        };
+      });
+  } finally {
+    sqliteDb.close();
+  }
+}
+
+/** Get the latest updated_at watermark from the knowledge table. */
+function getKnowledgeWatermark(): number {
+  let sqliteDb: Database.Database;
+  try {
+    sqliteDb = new Database(DB_PATH, { readonly: true });
+  } catch {
+    return 0;
+  }
+  try {
+    const row = sqliteDb
+      .prepare("SELECT MAX(updated_at) as max_ts FROM knowledge")
+      .get() as { max_ts: number | null } | undefined;
+    return row?.max_ts ?? 0;
+  } finally {
+    sqliteDb.close();
+  }
 }
 
 let lastKnowledgeIndexTime = 0;
 
 export async function indexKnowledgeFiles(): Promise<void> {
-  const files = scanKnowledgeFiles();
-  if (files.length === 0) return;
+  // Check watermark — only re-index if data has changed
+  const watermark = getKnowledgeWatermark();
+  if (watermark <= lastKnowledgeIndexTime) return;
 
-  // Check if any file is newer than the last index
-  const maxMtime = Math.max(...files.map((f) => f.mtime));
-  if (maxMtime <= lastKnowledgeIndexTime) return;
+  const files = scanKnowledgeFromDb();
+  if (files.length === 0) {
+    // All entries deleted — drop the LanceDB table if it exists
+    lastKnowledgeIndexTime = watermark || Date.now();
+    const conn = await getDb();
+    const tableNames = await conn.tableNames();
+    if (tableNames.includes("knowledge")) {
+      await conn.dropTable("knowledge");
+    }
+    return;
+  }
 
-  console.log(`[vector] Indexing ${files.length} knowledge files...`);
+  console.error(`[vector] Indexing ${files.length} knowledge entries from DB...`);
 
   const records: KnowledgeRecord[] = [];
   for (const file of files) {
@@ -179,8 +201,26 @@ export async function indexKnowledgeFiles(): Promise<void> {
   }
   await conn.createTable("knowledge", records);
 
-  lastKnowledgeIndexTime = maxMtime;
-  console.log(`[vector] Indexed ${records.length} knowledge chunks.`);
+  lastKnowledgeIndexTime = watermark;
+  console.error(`[vector] Indexed ${records.length} knowledge chunks.`);
+}
+
+const KNOWLEDGE_INDEX_INTERVAL_MS = Number(process.env.KNOWLEDGE_INDEX_INTERVAL_MS) || 60_000;
+
+/**
+ * Run an initial index, then re-index on a fixed interval.
+ * Returns the interval handle for cleanup.
+ */
+export function startKnowledgeIndexSync(): NodeJS.Timeout {
+  // Fire-and-forget initial index
+  indexKnowledgeFiles().catch((err) =>
+    console.error("[vector] Initial knowledge index failed:", err),
+  );
+  return setInterval(() => {
+    indexKnowledgeFiles().catch((err) =>
+      console.error("[vector] Periodic knowledge index failed:", err),
+    );
+  }, KNOWLEDGE_INDEX_INTERVAL_MS);
 }
 
 export async function searchKnowledge(
@@ -188,8 +228,6 @@ export async function searchKnowledge(
   scope?: string,
   limit = 10,
 ): Promise<Array<{ scope: string; file: string; chunk: string; score: number }>> {
-  await indexKnowledgeFiles();
-
   const conn = await getDb();
   const tableNames = await conn.tableNames();
   if (!tableNames.includes("knowledge")) return [];

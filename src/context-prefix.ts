@@ -331,10 +331,14 @@ export function buildPrefix(opts: PrefixOpts): string {
     "",
     "KNOWLEDGE & MEMORY TOOLS:",
     "You have `search_knowledge`, `recall_memories`, and `save_memory` tools available.",
-    "- Use `search_knowledge` when you need company guidelines, coding standards, or repo/channel-specific documentation.",
-    "- Use `recall_memories` when you need past decisions, conventions, or corrections the team has saved.",
-    "- Use `save_memory` to proactively save important information: when a user corrects you, states a convention (\"we always...\", \"we never...\"), makes a decision, or shares institutional knowledge that future conversations should know. Save it without asking — just do it and briefly mention you did.",
-    "Use these tools proactively when the question touches on conventions, standards, or institutional knowledge.",
+    "IMPORTANT: BEFORE answering any question, call `recall_memories` and/or `search_knowledge` first to check for relevant context. " +
+    "This applies to ALL questions — not just ones that obviously involve conventions or standards. " +
+    "The team saves corrections, vendor info, terminology, and institutional knowledge as memories. " +
+    "If you answer from your own knowledge without checking, you WILL get things wrong. Always check first.",
+    "- `search_knowledge`: company guidelines, coding standards, repo/channel-specific documentation.",
+    "- `recall_memories`: past decisions, conventions, corrections, vendor details, terminology the team has saved.",
+    "- `save_memory`: proactively save important information when a user corrects you, states a convention, " +
+    "makes a decision, or shares institutional knowledge. Save it without asking — just do it and briefly mention you did.",
   );
 
   // Security line

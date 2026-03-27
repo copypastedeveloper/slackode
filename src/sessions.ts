@@ -146,6 +146,22 @@ function getDb(): Database.Database {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope, scope_key)
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS knowledge (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'global',
+        scope_key TEXT,
+        created_by TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_scope_title ON knowledge(scope, scope_key, title)
+    `);
   }
   return db;
 }
@@ -908,4 +924,123 @@ export function deleteUserGithubToken(userId: string): boolean {
     .prepare("DELETE FROM user_github_tokens WHERE user_id = ?")
     .run(userId);
   return result.changes > 0;
+}
+
+// ── Knowledge management ──
+
+export interface KnowledgeRow {
+  id: number;
+  title: string;
+  content: string;
+  scope: string;
+  scope_key: string | null;
+  created_by: string;
+  updated_by: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export function addKnowledge(
+  title: string,
+  content: string,
+  scope: "global" | "repo" | "channel",
+  scopeKey: string | null,
+  createdBy: string,
+): number {
+  const result = getDb()
+    .prepare(
+      "INSERT INTO knowledge (title, content, scope, scope_key, created_by, updated_by) VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .run(title, content, scope, scopeKey, createdBy, createdBy);
+  return Number(result.lastInsertRowid);
+}
+
+export function getKnowledgeById(id: number): KnowledgeRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM knowledge WHERE id = ?")
+    .get(id) as KnowledgeRow | undefined;
+}
+
+export function getKnowledgeByTitle(
+  title: string,
+  scope?: string,
+  scopeKey?: string,
+): KnowledgeRow | undefined {
+  if (scope && scopeKey !== undefined) {
+    return getDb()
+      .prepare("SELECT * FROM knowledge WHERE title = ? AND scope = ? AND scope_key IS ?")
+      .get(title, scope, scopeKey ?? null) as KnowledgeRow | undefined;
+  }
+  // Search across all scopes, return first match
+  return getDb()
+    .prepare("SELECT * FROM knowledge WHERE title = ? ORDER BY updated_at DESC LIMIT 1")
+    .get(title) as KnowledgeRow | undefined;
+}
+
+export function updateKnowledge(id: number, content: string, updatedBy: string): boolean {
+  const result = getDb()
+    .prepare("UPDATE knowledge SET content = ?, updated_by = ?, updated_at = unixepoch() WHERE id = ?")
+    .run(content, updatedBy, id);
+  return result.changes > 0;
+}
+
+export function removeKnowledge(id: number): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM knowledge WHERE id = ?")
+    .run(id);
+  return result.changes > 0;
+}
+
+export function listKnowledge(
+  scope?: string,
+  scopeKey?: string,
+): KnowledgeRow[] {
+  if (scope && scopeKey !== undefined) {
+    return getDb()
+      .prepare("SELECT * FROM knowledge WHERE scope = ? AND scope_key IS ? ORDER BY title")
+      .all(scope, scopeKey ?? null) as KnowledgeRow[];
+  }
+  if (scope) {
+    return getDb()
+      .prepare("SELECT * FROM knowledge WHERE scope = ? ORDER BY title")
+      .all(scope) as KnowledgeRow[];
+  }
+  return getDb()
+    .prepare("SELECT * FROM knowledge ORDER BY scope, title")
+    .all() as KnowledgeRow[];
+}
+
+export function getKnowledgeContent(
+  scope: string,
+  scopeKey?: string,
+  maxChars?: number,
+): string {
+  const rows = scopeKey !== undefined
+    ? getDb()
+        .prepare("SELECT title, content FROM knowledge WHERE scope = ? AND scope_key IS ? ORDER BY title")
+        .all(scope, scopeKey ?? null) as Array<{ title: string; content: string }>
+    : getDb()
+        .prepare("SELECT title, content FROM knowledge WHERE scope = ? ORDER BY title")
+        .all(scope) as Array<{ title: string; content: string }>;
+
+  const parts: string[] = [];
+  let totalLen = 0;
+
+  for (const row of rows) {
+    const text = row.content.trim();
+    if (!text) continue;
+
+    if (maxChars && totalLen + text.length > maxChars) {
+      const remaining = maxChars - totalLen;
+      if (remaining > 100) {
+        parts.push(text.slice(0, remaining) + "\n[...truncated]");
+      }
+      break;
+    }
+
+    parts.push(text);
+    totalLen += text.length;
+  }
+
+  return parts.join("\n\n");
 }
