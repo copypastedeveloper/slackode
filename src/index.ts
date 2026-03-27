@@ -11,8 +11,9 @@ import {
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
-import { resumeCodingWithAgent, resumeCodingWithRepo, handleApprove, handleRevise } from "./handlers/coding-handler.js";
-import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS } from "./constants.js";
+import { resumeCodingWithAgent, resumeCodingWithRepo, handleApprove, handleRevise, resumeCodingAfterPATConnect } from "./handlers/coding-handler.js";
+import { validateAndStoreGithubPAT } from "./handlers/github-commands.js";
+import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, GITHUB_CONNECT_MODAL_CALLBACK } from "./constants.js";
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN;
@@ -132,6 +133,82 @@ app.action(Action.CODING_CANCEL, async ({ action, ack, body, client }) => {
   if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handleCancel(threadTs, body.user.id);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
+});
+
+// GitHub Connect button → open modal
+app.action(Action.GITHUB_CONNECT, async ({ action, ack, body, client }) => {
+  await ack();
+  const { threadTs, channelId } = JSON.parse((action as { value: string }).value);
+  const triggerId = (body as { trigger_id?: string }).trigger_id;
+  if (!triggerId) return;
+
+  await client.views.open({
+    trigger_id: triggerId,
+    view: {
+      type: "modal",
+      callback_id: GITHUB_CONNECT_MODAL_CALLBACK,
+      private_metadata: JSON.stringify({ threadTs, channelId }),
+      title: { type: "plain_text", text: "Connect GitHub" },
+      submit: { type: "plain_text", text: "Connect" },
+      close: { type: "plain_text", text: "Cancel" },
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "Enter a GitHub Personal Access Token with `repo` scope.\n" +
+              "Create one at <https://github.com/settings/tokens>.",
+          },
+        },
+        {
+          type: "input",
+          block_id: "pat_block",
+          label: { type: "plain_text", text: "Personal Access Token" },
+          element: {
+            type: "plain_text_input",
+            action_id: "pat_input",
+            placeholder: { type: "plain_text", text: "ghp_... or github_pat_..." },
+          },
+        },
+      ],
+    },
+  });
+});
+
+// GitHub Connect modal submission
+app.view(GITHUB_CONNECT_MODAL_CALLBACK, async ({ ack, view, body, client }) => {
+  const pat = view.state.values.pat_block.pat_input.value?.trim();
+  const userId = body.user.id;
+  const { threadTs, channelId } = JSON.parse(view.private_metadata);
+
+  if (!pat) {
+    await ack({
+      response_action: "errors",
+      errors: { pat_block: "Please enter a token." },
+    });
+    return;
+  }
+
+  try {
+    const info = await validateAndStoreGithubPAT(userId, pat);
+    await ack();
+
+    // Post confirmation in thread
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: `GitHub connected! Commits and PRs will be attributed to *${info.name}* (${info.username}, ${info.email}).`,
+    });
+
+    // Resume the pending coding session
+    await resumeCodingAfterPATConnect(threadTs, client, channelId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await ack({
+      response_action: "errors",
+      errors: { pat_block: msg },
+    });
+  }
 });
 
 /**

@@ -11,6 +11,7 @@ export const Action = {
   SELECT_AGENT_PREFIX: "select_agent_",
   /** Prefix for repo selection buttons: select_repo_0, select_repo_1, etc. */
   SELECT_REPO_PREFIX: "select_repo_",
+  GITHUB_CONNECT: "github_connect",
 } as const;
 
 /** Maximum number of agent selection buttons (Slack allows 5 elements per actions block). */
@@ -27,7 +28,10 @@ export const BlockPrefix = {
   CODING_PLAN: "coding_plan_",
   AGENT_SELECT: "agent_select_",
   REPO_SELECT: "repo_select_",
+  GITHUB_CONNECT: "github_connect_",
 } as const;
+
+export const GITHUB_CONNECT_MODAL_CALLBACK = "github_connect_modal";
 
 // ── Git identity for bot commits ──
 

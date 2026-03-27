@@ -21,6 +21,7 @@ import { handleConfigCommand } from "./config-commands.js";
 import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
 import { handleRepoCommand } from "./repo-commands.js";
 import { handleRoleCommand } from "./role-commands.js";
+import { handleGithubCommand } from "./github-commands.js";
 import { handleCodeCommand } from "./code-commands.js";
 import { handleCodingMessage, handleCodeStart } from "./coding-handler.js";
 
@@ -134,6 +135,17 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
         await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: roleReply });
       }
       return;
+    }
+
+    // ── GitHub PAT management (connect/disconnect/status) ──
+    if (/^github\s+/i.test(question)) {
+      const githubReply = await handleGithubCommand(question, channelId, channelType, userId, threadTs, client);
+      if (githubReply !== undefined) {
+        if (githubReply.length > 0) {
+          await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: githubReply });
+        }
+        return;
+      }
     }
   }
 

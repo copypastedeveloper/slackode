@@ -15,7 +15,7 @@ import { downloadFiles, type SlackFile, type ConvertedFile } from "../utils/slac
 import { createProgressUpdater } from "../utils/progress.js";
 import { safePostResponse } from "./shared.js";
 import { Action, BlockPrefix, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, HOSTNAME } from "../constants.js";
-import { getEnabledRepos } from "../sessions.js";
+import { getEnabledRepos, getUserGithubToken } from "../sessions.js";
 import { resolveRepoForChannel } from "../repo-manager.js";
 
 // ── Coding session button builders ──
@@ -361,6 +361,32 @@ export async function resumeCodingWithAgent(
   });
 }
 
+/**
+ * Resume a pending coding request after GitHub PAT connect.
+ */
+export async function resumeCodingAfterPATConnect(
+  threadTs: string,
+  client: WebClient,
+  channelId: string,
+): Promise<void> {
+  const pending = pendingCodingRequests.get(threadTs);
+  if (!pending) return; // No pending request — user may have started fresh
+  pendingCodingRequests.delete(threadTs);
+
+  await handleCodeStart({
+    description: pending.description,
+    agent: pending.agent,
+    channelId: pending.channelId,
+    userId: pending.userId,
+    threadTs: pending.threadTs,
+    client: pending.client,
+    slackCtx: pending.slackCtx,
+    files: pending.files,
+    isThread: pending.isThread,
+    botUserId: pending.botUserId,
+  });
+}
+
 // ── Plan approval / revision ──
 
 /**
@@ -489,6 +515,47 @@ interface CodeStartOpts {
  */
 export async function handleCodeStart(opts: CodeStartOpts): Promise<void> {
   const { description, agent, channelId, userId, threadTs, client, slackCtx, files: eventFiles, isThread, botUserId } = opts;
+
+  // ── PAT gate: require GitHub connection before starting a coding session ──
+  const ghToken = getUserGithubToken(userId);
+  if (!ghToken) {
+    // Store pending request so we can resume after PAT connect
+    pendingCodingRequests.set(threadTs, {
+      description, agent, channelId, userId, threadTs, client, slackCtx,
+      files: eventFiles, isThread, botUserId,
+    });
+
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: "You need to connect your GitHub account before starting a coding session. " +
+        "This ensures commits and PRs are attributed to you.",
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "You need to connect your GitHub account before starting a coding session.\n" +
+              "This ensures commits and PRs are attributed to you.",
+          },
+        },
+        {
+          type: "actions",
+          block_id: `${BlockPrefix.GITHUB_CONNECT}${threadTs}`,
+          elements: [
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Connect GitHub" },
+              action_id: Action.GITHUB_CONNECT,
+              value: JSON.stringify({ threadTs, channelId }),
+              style: "primary",
+            },
+          ],
+        },
+      ],
+    });
+    return;
+  }
 
   // Check if multiple repos exist and no agent was explicitly specified
   const allRepos = getEnabledRepos();
