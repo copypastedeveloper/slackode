@@ -1,7 +1,7 @@
 import bolt from "@slack/bolt";
 const { App } = bolt;
 import { initOpencode } from "./opencode.js";
-import { closeDb, seedToolsFromFile } from "./sessions.js";
+import { closeDb, seedToolsFromFile, bootstrapAdmins, hasRole } from "./sessions.js";
 import { writeOpencodeConfig } from "./opencode-config.js";
 import { setRepoDir, startServer, stopServer } from "./opencode-server.js";
 import { initRepos, generateContextForAllRepos } from "./repo-manager.js";
@@ -12,8 +12,9 @@ import { syncKnowledge, startKnowledgeSync } from "./knowledge.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
-import { resumeCodingWithAgent, handleApprove, handleRevise } from "./handlers/coding-handler.js";
-import { Action, MAX_AGENT_BUTTONS } from "./constants.js";
+import { resumeCodingWithAgent, resumeCodingWithRepo, handleApprove, handleRevise, resumeCodingAfterPATConnect } from "./handlers/coding-handler.js";
+import { validateAndStoreGithubPAT } from "./handlers/github-commands.js";
+import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, GITHUB_CONNECT_MODAL_CALLBACK } from "./constants.js";
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN;
@@ -41,12 +42,25 @@ const app = new App({
 app.event("app_mention", handleMention);
 app.event("message", handleDm);
 
+// Helper: check developer permission for button actions
+async function requireDeveloper(
+  userId: string, channel: string, threadTs: string, client: InstanceType<typeof App>["client"],
+): Promise<boolean> {
+  if (hasRole(userId, "developer")) return true;
+  await client.chat.postEphemeral({
+    channel, user: userId, thread_ts: threadTs,
+    text: "This action requires *developer* permissions. Ask an admin to run `role add @you developer`.",
+  });
+  return false;
+}
+
 // Register coding session button actions
 app.action(Action.CODING_STATUS, async ({ action, ack, body, client }) => {
   await ack();
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handleStatus(threadTs);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
@@ -56,6 +70,7 @@ app.action(Action.CODING_PR, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handlePR(threadTs, body.user.id, undefined, false);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
@@ -65,9 +80,22 @@ app.action(Action.CODING_DONE, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handlePR(threadTs, body.user.id, undefined, true);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
+
+// Repo selection buttons (select_repo_0 through select_repo_N)
+for (let i = 0; i < MAX_REPO_BUTTONS; i++) {
+  app.action(`${Action.SELECT_REPO_PREFIX}${i}`, async ({ action, ack, body, client }) => {
+    await ack();
+    const { threadTs, repoName } = JSON.parse((action as { value: string }).value);
+    const channel = (body as { channel?: { id: string } }).channel?.id;
+    if (!channel) return;
+    if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
+    await resumeCodingWithRepo(threadTs, repoName, client, channel);
+  });
+}
 
 // Agent selection buttons (select_agent_0 through select_agent_N)
 for (let i = 0; i < MAX_AGENT_BUTTONS; i++) {
@@ -76,6 +104,7 @@ for (let i = 0; i < MAX_AGENT_BUTTONS; i++) {
     const { threadTs, agent } = JSON.parse((action as { value: string }).value);
     const channel = (body as { channel?: { id: string } }).channel?.id;
     if (!channel) return;
+    if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
     await resumeCodingWithAgent(threadTs, agent, client, channel);
   });
 }
@@ -85,6 +114,7 @@ app.action(Action.CODING_APPROVE, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   await handleApprove(threadTs, body.user.id, client, channel);
 });
 
@@ -93,6 +123,7 @@ app.action(Action.CODING_REVISE, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   await handleRevise(threadTs, body.user.id, client, channel);
 });
 
@@ -101,10 +132,86 @@ app.action(Action.CODING_CANCEL, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handleCancel(threadTs, body.user.id);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
 
+// GitHub Connect button → open modal
+app.action(Action.GITHUB_CONNECT, async ({ action, ack, body, client }) => {
+  await ack();
+  const { threadTs, channelId } = JSON.parse((action as { value: string }).value);
+  const triggerId = (body as { trigger_id?: string }).trigger_id;
+  if (!triggerId) return;
+
+  await client.views.open({
+    trigger_id: triggerId,
+    view: {
+      type: "modal",
+      callback_id: GITHUB_CONNECT_MODAL_CALLBACK,
+      private_metadata: JSON.stringify({ threadTs, channelId }),
+      title: { type: "plain_text", text: "Connect GitHub" },
+      submit: { type: "plain_text", text: "Connect" },
+      close: { type: "plain_text", text: "Cancel" },
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "Enter a GitHub Personal Access Token with `repo` scope.\n" +
+              "Create one at <https://github.com/settings/tokens>.",
+          },
+        },
+        {
+          type: "input",
+          block_id: "pat_block",
+          label: { type: "plain_text", text: "Personal Access Token" },
+          element: {
+            type: "plain_text_input",
+            action_id: "pat_input",
+            placeholder: { type: "plain_text", text: "ghp_... or github_pat_..." },
+          },
+        },
+      ],
+    },
+  });
+});
+
+// GitHub Connect modal submission
+app.view(GITHUB_CONNECT_MODAL_CALLBACK, async ({ ack, view, body, client }) => {
+  const pat = view.state.values.pat_block.pat_input.value?.trim();
+  const userId = body.user.id;
+  const { threadTs, channelId } = JSON.parse(view.private_metadata);
+
+  if (!pat) {
+    await ack({
+      response_action: "errors",
+      errors: { pat_block: "Please enter a token." },
+    });
+    return;
+  }
+
+  try {
+    const info = await validateAndStoreGithubPAT(userId, pat);
+    await ack();
+
+    // Post confirmation in thread
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: `GitHub connected! Commits and PRs will be attributed to *${info.name}* (${info.username}, ${info.email}).`,
+    });
+
+    // Resume the pending coding session
+    await resumeCodingAfterPATConnect(threadTs, client, channelId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await ack({
+      response_action: "errors",
+      errors: { pat_block: msg },
+    });
+  }
+});
 
 /**
  * Run context generation for all repos, logging errors but never crashing the bot.
@@ -119,8 +226,16 @@ async function runContextGeneration(): Promise<void> {
 
 // Start the app
 async function start(): Promise<void> {
-  // 1. Seed tools from tools.json on first boot (getDb() is called lazily inside)
+  // 1a. Seed tools from tools.json on first boot (getDb() is called lazily inside)
   seedToolsFromFile(TOOLS_SEED_PATH);
+
+  // 1b. Bootstrap admin users from env
+  const adminUsersEnv = process.env.ADMIN_USERS;
+  if (adminUsersEnv) {
+    const adminIds = adminUsersEnv.split(",").map(s => s.trim()).filter(Boolean);
+    bootstrapAdmins(adminIds);
+    console.log(`[permissions] Bootstrapped ${adminIds.length} admin(s) from ADMIN_USERS`);
+  }
 
   // 2. Generate opencode.json from DB-backed tool config
   setRepoDir(REPO_DIR);
@@ -149,11 +264,13 @@ async function start(): Promise<void> {
   // 8. Start coding session idle reaper (every 5 min)
   const reaperInterval = startSessionReaper();
 
-  // Generate context files on startup (non-blocking — bot is already serving)
-  runContextGeneration();
-
-  // Regenerate context every hour
-  setInterval(runContextGeneration, CONTEXT_GEN_INTERVAL_MS);
+  // Generate context files after a delay so startup Q&A isn't rate-limited
+  const CONTEXT_GEN_STARTUP_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+  setTimeout(() => {
+    runContextGeneration();
+    // Regenerate context every hour after the first run
+    setInterval(runContextGeneration, CONTEXT_GEN_INTERVAL_MS);
+  }, CONTEXT_GEN_STARTUP_DELAY_MS);
 }
 
 // Graceful shutdown

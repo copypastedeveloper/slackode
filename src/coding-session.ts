@@ -1,5 +1,5 @@
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import {
   createOpencodeClient,
@@ -9,12 +9,12 @@ import {
   getCodingSession, saveCodingSession, updateCodingSessionStatus,
   updateCodingSessionOpencode, touchCodingSession, deleteCodingSession,
   getActiveCodingSessions, getIdleCodingSessions, getEnabledRepos,
-  getRepo, SessionStatus,
+  getRepo, SessionStatus, getUserGithubPAT,
   type CodingSessionRow,
 } from "./sessions.js";
 import { writeOpencodeConfig } from "./opencode-config.js";
 import {
-  HOSTNAME, CODING_BASE_PORT, GIT_AUTHOR,
+  HOSTNAME, CODING_BASE_PORT,
   BOT_MANAGED_PATHS, INTERNAL_AGENT_NAMES, INTERNAL_AGENT_PREFIX,
   REQUEST_TIMEOUT_MS, waitForHealth,
 } from "./constants.js";
@@ -116,6 +116,7 @@ export async function createCodingSession(
   channelId: string,
   agent: string = "code",
   description?: string,
+  repoNameOverride?: string,
 ): Promise<CodingSession> {
   // Check session limit
   const active = getActiveCodingSessions();
@@ -126,15 +127,22 @@ export async function createCodingSession(
     );
   }
 
-  // Resolve repo for this channel
-  const repoInfo = resolveRepoForChannel(channelId);
-  if (!repoInfo) {
-    throw new Error("No repository configured for this channel. Use `repo add` first.");
-  }
-
-  const repoRow = getRepo(repoInfo.name);
-  if (!repoRow) {
-    throw new Error(`Repository '${repoInfo.name}' not found.`);
+  // Resolve repo: use override if provided, otherwise resolve from channel
+  let repoRow;
+  if (repoNameOverride) {
+    repoRow = getRepo(repoNameOverride);
+    if (!repoRow || !repoRow.enabled) {
+      throw new Error(`Repository '${repoNameOverride}' not found or disabled.`);
+    }
+  } else {
+    const repoInfo = resolveRepoForChannel(channelId);
+    if (!repoInfo) {
+      throw new Error("No repository configured for this channel. Use `repo add` first.");
+    }
+    repoRow = getRepo(repoInfo.name);
+    if (!repoRow) {
+      throw new Error(`Repository '${repoInfo.name}' not found.`);
+    }
   }
 
   const repoDir = repoRow.dir;
@@ -207,7 +215,7 @@ export async function createCodingSession(
     threadKey,
     userId,
     channelId,
-    repoName: repoInfo.name,
+    repoName: repoRow.name,
     branch,
     worktreePath: worktreeDir,
     port,
@@ -243,7 +251,7 @@ export async function createCodingSession(
     threadKey,
     userId,
     channelId,
-    repoName: repoInfo.name,
+    repoName: repoRow.name,
     branch,
     worktreePath: worktreeDir,
     port,
@@ -500,23 +508,38 @@ export async function createCodingSessionPR(
     cwd, encoding: "utf-8", timeout: 10_000,
   }).trim();
 
-  // Commit
+  // Resolve user's GitHub PAT for commit attribution and push auth
+  const userPat = getUserGithubPAT(row.user_id);
+  if (!userPat) {
+    throw new Error("No GitHub account connected. Run `github connect <pat>` first.");
+  }
+
+  // Commit with user's identity
   const commitMessage = title || `bot: changes from coding session ${row.thread_key}`;
   execFileSync("git", ["commit", "-m", commitMessage], {
     cwd, encoding: "utf-8", env: {
       ...process.env,
-      GIT_AUTHOR_NAME: GIT_AUTHOR.name,
-      GIT_AUTHOR_EMAIL: GIT_AUTHOR.email,
-      GIT_COMMITTER_NAME: GIT_AUTHOR.name,
-      GIT_COMMITTER_EMAIL: GIT_AUTHOR.email,
+      GIT_AUTHOR_NAME: userPat.name,
+      GIT_AUTHOR_EMAIL: userPat.email,
+      GIT_COMMITTER_NAME: userPat.name,
+      GIT_COMMITTER_EMAIL: userPat.email,
     },
     timeout: 10_000,
   });
 
-  // Push branch
-  execFileSync("git", ["push", "-u", "origin", row.branch], {
-    cwd, encoding: "utf-8", env: process.env, timeout: 60_000,
-  });
+  // Push branch using user's PAT via GIT_ASKPASS
+  const shortKey = threadKey.replace(".", "-");
+  const askpassPath = `/tmp/git-askpass-${shortKey}.sh`;
+  writeFileSync(askpassPath, `#!/bin/sh\necho '${userPat.token}'\n`, { mode: 0o700 });
+  try {
+    execFileSync("git", ["push", "-u", "origin", row.branch], {
+      cwd, encoding: "utf-8",
+      env: { ...process.env, GIT_ASKPASS: askpassPath, GIT_TERMINAL_PROMPT: "0" },
+      timeout: 60_000,
+    });
+  } finally {
+    try { unlinkSync(askpassPath); } catch { /* best effort */ }
+  }
 
   // Get the full diff for PR description context
   let fullDiff = "";
@@ -561,7 +584,7 @@ export async function createCodingSessionPR(
   const prUrl = execFileSync(
     "gh",
     ["pr", "create", "--draft", "--title", prTitle, "--body", prBody, "--head", row.branch],
-    { cwd, encoding: "utf-8", env: process.env, timeout: 30_000 },
+    { cwd, encoding: "utf-8", env: { ...process.env, GH_TOKEN: userPat.token }, timeout: 30_000 },
   ).trim();
 
   return { prUrl, diffstat, changedFiles };

@@ -14,7 +14,9 @@ import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackCont
 import { downloadFiles, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
 import { safePostResponse } from "./shared.js";
-import { Action, BlockPrefix, MAX_AGENT_BUTTONS, HOSTNAME } from "../constants.js";
+import { Action, BlockPrefix, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, HOSTNAME } from "../constants.js";
+import { getEnabledRepos, getUserGithubToken } from "../sessions.js";
+import { resolveRepoForChannel } from "../repo-manager.js";
 
 // ── Coding session button builders ──
 
@@ -305,8 +307,23 @@ interface PendingCodingRequest {
   files: SlackFile[];
   isThread: boolean;
   botUserId?: string;
+  repoName?: string;
+  agent?: string;
+  /** Timestamp (ms) when the pending request was created — used for TTL cleanup. */
+  createdAt: number;
 }
 const pendingCodingRequests = new Map<string, PendingCodingRequest>();
+const PENDING_REQUEST_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** Purge pending requests older than PENDING_REQUEST_TTL_MS. */
+function purgeStalePendingRequests(): void {
+  const now = Date.now();
+  for (const [key, req] of pendingCodingRequests) {
+    if (now - req.createdAt > PENDING_REQUEST_TTL_MS) {
+      pendingCodingRequests.delete(key);
+    }
+  }
+}
 
 /**
  * Resume a pending coding request after agent selection via button click.
@@ -353,6 +370,32 @@ export async function resumeCodingWithAgent(
     botUserId: pending.botUserId,
     client: pending.client,
     slackCtx: pending.slackCtx,
+  });
+}
+
+/**
+ * Resume a pending coding request after GitHub PAT connect.
+ */
+export async function resumeCodingAfterPATConnect(
+  threadTs: string,
+  client: WebClient,
+  channelId: string,
+): Promise<void> {
+  const pending = pendingCodingRequests.get(threadTs);
+  if (!pending) return; // No pending request — user may have started fresh
+  pendingCodingRequests.delete(threadTs);
+
+  await handleCodeStart({
+    description: pending.description,
+    agent: pending.agent,
+    channelId: pending.channelId,
+    userId: pending.userId,
+    threadTs: pending.threadTs,
+    client: pending.client,
+    slackCtx: pending.slackCtx,
+    files: pending.files,
+    isThread: pending.isThread,
+    botUserId: pending.botUserId,
   });
 }
 
@@ -475,9 +518,146 @@ interface CodeStartOpts {
 
 /**
  * Start a new coding session in response to "code <description>".
+ *
+ * Flow:
+ * 1. If multiple repos and no explicit agent → show repo selection buttons
+ * 2. After repo is selected (or only one repo) → create session
+ * 3. If repo agents exist → show agent selection buttons
+ * 4. After agent is selected (or no repo agents) → proceed to coding
  */
 export async function handleCodeStart(opts: CodeStartOpts): Promise<void> {
   const { description, agent, channelId, userId, threadTs, client, slackCtx, files: eventFiles, isThread, botUserId } = opts;
+
+  // ── PAT gate: require GitHub connection before starting a coding session ──
+  purgeStalePendingRequests();
+  const ghToken = getUserGithubToken(userId);
+  if (!ghToken) {
+    // Store pending request so we can resume after PAT connect
+    pendingCodingRequests.set(threadTs, {
+      description, agent, channelId, userId, threadTs, client, slackCtx,
+      files: eventFiles, isThread, botUserId, createdAt: Date.now(),
+    });
+
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: "You need to connect your GitHub account before starting a coding session. " +
+        "This ensures commits and PRs are attributed to you.",
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "You need to connect your GitHub account before starting a coding session.\n" +
+              "This ensures commits and PRs are attributed to you.",
+          },
+        },
+        {
+          type: "actions",
+          block_id: `${BlockPrefix.GITHUB_CONNECT}${threadTs}`,
+          elements: [
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Connect GitHub" },
+              action_id: Action.GITHUB_CONNECT,
+              value: JSON.stringify({ threadTs, channelId }),
+              style: "primary",
+            },
+          ],
+        },
+      ],
+    });
+    return;
+  }
+
+  // Check if multiple repos exist and no agent was explicitly specified
+  const allRepos = getEnabledRepos();
+  if (!agent && allRepos.length > 1) {
+    // Show repo selection — don't create session yet
+    const channelRepo = resolveRepoForChannel(channelId);
+    const repoButtons: KnownBlock = {
+      type: "actions",
+      block_id: `${BlockPrefix.REPO_SELECT}${threadTs}`,
+      elements: allRepos.slice(0, MAX_REPO_BUTTONS).map((r, i) => {
+        const isChannelDefault = channelRepo?.name === r.name;
+        const label = isChannelDefault ? `${r.name} (default)` : r.name;
+        return {
+          type: "button" as const,
+          text: { type: "plain_text" as const, text: label },
+          action_id: `${Action.SELECT_REPO_PREFIX}${i}`,
+          value: JSON.stringify({ threadTs, repoName: r.name }),
+        };
+      }),
+    } as KnownBlock;
+
+    const selectText = "*Select a repository for this coding session:*";
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: selectText,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: selectText } },
+        repoButtons,
+      ],
+    });
+
+    // Store pending request — session created after repo selection
+    pendingCodingRequests.set(threadTs, {
+      description, channelId, userId, threadTs, client, slackCtx,
+      files: eventFiles, isThread, botUserId, createdAt: Date.now(),
+    });
+    return;
+  }
+
+  // Single repo (or explicit agent) — create session immediately
+  await createSessionAndProceed({
+    description, agent, channelId, userId, threadTs, client, slackCtx,
+    files: eventFiles, isThread, botUserId,
+  });
+}
+
+/**
+ * Resume a pending coding request after repo selection via button click.
+ * Creates the session in the selected repo, then checks for agent selection.
+ */
+export async function resumeCodingWithRepo(
+  threadTs: string,
+  repoName: string,
+  client: WebClient,
+  channelId: string,
+): Promise<void> {
+  const pending = pendingCodingRequests.get(threadTs);
+  if (!pending) {
+    await client.chat.postMessage({
+      channel: channelId,
+      thread_ts: threadTs,
+      text: "_No pending request found. The session may have timed out._",
+    });
+    return;
+  }
+  // Don't delete yet — agent selection may still need it
+  pending.repoName = repoName;
+
+  await createSessionAndProceed({
+    description: pending.description,
+    channelId: pending.channelId,
+    userId: pending.userId,
+    threadTs,
+    client: pending.client,
+    slackCtx: pending.slackCtx,
+    files: pending.files,
+    isThread: pending.isThread,
+    botUserId: pending.botUserId,
+    repoName,
+  });
+}
+
+/**
+ * Create a coding session and proceed to agent selection or coding.
+ * Shared by handleCodeStart (single repo) and resumeCodingWithRepo (after repo selection).
+ */
+async function createSessionAndProceed(opts: CodeStartOpts & { repoName?: string }): Promise<void> {
+  const { description, agent, channelId, userId, threadTs, client, slackCtx, files: eventFiles, isThread, botUserId, repoName } = opts;
 
   const startMsg = await client.chat.postMessage({
     channel: channelId,
@@ -491,35 +671,32 @@ export async function handleCodeStart(opts: CodeStartOpts): Promise<void> {
     // with session creation — enrichment uses the Q&A server, session creation starts coding server
     const [enrichedDescription, session] = await Promise.all([
       enrichContextForCoding(description),
-      createCodingSession(threadTs, userId, channelId, agent ?? "code", description),
+      createCodingSession(threadTs, userId, channelId, agent ?? "code", description, repoName),
     ]);
 
     // If no agent was explicitly specified, check for repo-provided agents
     if (!agent) {
       const allAgents = await listCodingAgents(threadTs);
-      // Repo agents = not built-in (excludes code, build, context, compaction, title, summary, build-* variants, etc.)
       const repoAgents = allAgents.filter((a) => !a.builtIn);
       console.log(`[coding] Repo agents: [${repoAgents.map((a) => a.name).join(", ")}]`);
 
       if (repoAgents.length > 0) {
-        // Store pending request and show agent selection
+        // Store/update pending request and show agent selection
         pendingCodingRequests.set(threadTs, {
           description: enrichedDescription, channelId, userId, threadTs, client, slackCtx,
-          files: eventFiles, isThread, botUserId,
+          files: eventFiles, isThread, botUserId, repoName, createdAt: Date.now(),
         });
 
         const agentButtons: KnownBlock = {
           type: "actions",
           block_id: `${BlockPrefix.AGENT_SELECT}${threadTs}`,
           elements: [
-            // Default "code" agent always first
             {
               type: "button",
               text: { type: "plain_text", text: "code (default)" },
               action_id: `${Action.SELECT_AGENT_PREFIX}0`,
               value: JSON.stringify({ threadTs, agent: "code" }),
             },
-            // Repo-provided agents (limited by Slack's 5-element-per-block constraint)
             ...repoAgents.slice(0, MAX_AGENT_BUTTONS - 1).map((a, i) => ({
               type: "button" as const,
               text: { type: "plain_text" as const, text: a.name },
@@ -537,14 +714,14 @@ export async function handleCodeStart(opts: CodeStartOpts): Promise<void> {
           blocks: [
             { type: "section", text: { type: "mrkdwn", text: selectText } },
             agentButtons,
-            codingActionButtons(threadTs),
           ],
         });
         return;
       }
     }
 
-    // No agent selection needed — proceed immediately
+    // No agent selection needed — clean up any pending request and proceed
+    pendingCodingRequests.delete(threadTs);
     const agentLabel = session.agent !== "code" ? `\nAgent: \`${session.agent}\`` : "";
 
     const startText = `*Coding session started!*\nRepo: \`${session.repoName}\`\nBranch: \`${session.branch}\`${agentLabel}\n\n_Processing your request..._`;
@@ -552,10 +729,6 @@ export async function handleCodeStart(opts: CodeStartOpts): Promise<void> {
       channel: channelId,
       ts: startMsgTs,
       text: startText,
-      blocks: [
-        { type: "section", text: { type: "mrkdwn", text: startText } },
-        codingActionButtons(threadTs),
-      ],
     });
 
     // Now route the enriched description as the first message

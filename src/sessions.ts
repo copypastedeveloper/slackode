@@ -111,6 +111,27 @@ function getDb(): Database.Database {
       )
     `);
     db.exec(`
+      CREATE TABLE IF NOT EXISTS permissions (
+        user_id TEXT PRIMARY KEY,
+        role TEXT NOT NULL CHECK (role IN ('admin', 'developer')),
+        granted_by TEXT NOT NULL,
+        granted_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_github_tokens (
+        user_id TEXT PRIMARY KEY,
+        encrypted_token TEXT NOT NULL,
+        token_iv TEXT NOT NULL,
+        token_tag TEXT NOT NULL,
+        github_username TEXT NOT NULL,
+        github_name TEXT NOT NULL,
+        github_email TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    db.exec(`
       CREATE TABLE IF NOT EXISTS memories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         content TEXT NOT NULL,
@@ -644,6 +665,65 @@ export function getIdleCodingSessions(maxIdleSeconds: number): CodingSessionRow[
     .all(maxIdleSeconds) as CodingSessionRow[];
 }
 
+// ── Permissions ──
+
+const ROLE_RANK: Record<string, number> = { admin: 2, developer: 1, user: 0 };
+
+export type Role = "admin" | "developer" | "user";
+
+export function getUserRole(userId: string): Role {
+  const row = getDb()
+    .prepare("SELECT role FROM permissions WHERE user_id = ?")
+    .get(userId) as { role: string } | undefined;
+  return (row?.role as Role) ?? "user";
+}
+
+export function hasRole(userId: string, minRole: "admin" | "developer"): boolean {
+  const actual = getUserRole(userId);
+  return (ROLE_RANK[actual] ?? 0) >= (ROLE_RANK[minRole] ?? 0);
+}
+
+export function setRole(userId: string, role: "admin" | "developer", grantedBy: string): void {
+  getDb()
+    .prepare(
+      "INSERT OR REPLACE INTO permissions (user_id, role, granted_by, granted_at) VALUES (?, ?, ?, unixepoch())"
+    )
+    .run(userId, role, grantedBy);
+}
+
+export function removeRole(userId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM permissions WHERE user_id = ?")
+    .run(userId);
+  return result.changes > 0;
+}
+
+export interface PermissionRow {
+  user_id: string;
+  role: string;
+  granted_by: string;
+  granted_at: number;
+}
+
+export function listPermissions(): PermissionRow[] {
+  return getDb()
+    .prepare("SELECT user_id, role, granted_by, granted_at FROM permissions ORDER BY granted_at")
+    .all() as PermissionRow[];
+}
+
+export function bootstrapAdmins(userIds: string[]): void {
+  const database = getDb();
+  const insert = database.prepare(
+    "INSERT OR IGNORE INTO permissions (user_id, role, granted_by) VALUES (?, 'admin', 'ENV')"
+  );
+  const txn = database.transaction(() => {
+    for (const id of userIds) {
+      insert.run(id);
+    }
+  });
+  txn();
+}
+
 // ── Memory management ──
 
 export interface MemoryRow {
@@ -699,54 +779,12 @@ export function getMemoriesForContext(
     .all(...params, limit) as MemoryRow[];
 }
 
-/**
- * Search memories by keyword (LIKE-based).
- */
-export function searchMemories(
-  query: string,
-  scope?: string,
-  scopeKey?: string,
-): MemoryRow[] {
-  const conditions = ["(content LIKE ? OR tags LIKE ?)"];
-  const params: unknown[] = [`%${query}%`, `%${query}%`];
-
-  if (scope) {
-    conditions.push("scope = ?");
-    params.push(scope);
-  }
-  if (scopeKey) {
-    conditions.push("scope_key = ?");
-    params.push(scopeKey);
-  }
-
-  const where = conditions.join(" AND ");
-  return getDb()
-    .prepare(`SELECT * FROM memories WHERE ${where} ORDER BY updated_at DESC LIMIT 20`)
-    .all(...params) as MemoryRow[];
-}
-
 export function deleteMemory(id: number, userId: string): boolean {
   // Allow deletion if the user created it OR if it was created by 'agent'
   const result = getDb()
     .prepare("DELETE FROM memories WHERE id = ? AND (created_by = ? OR created_by = 'agent')")
     .run(id, userId);
   return result.changes > 0;
-}
-
-export function listMemories(scope?: string, scopeKey?: string): MemoryRow[] {
-  if (scope && scopeKey) {
-    return getDb()
-      .prepare("SELECT * FROM memories WHERE scope = ? AND scope_key = ? ORDER BY updated_at DESC")
-      .all(scope, scopeKey) as MemoryRow[];
-  }
-  if (scope) {
-    return getDb()
-      .prepare("SELECT * FROM memories WHERE scope = ? ORDER BY updated_at DESC")
-      .all(scope) as MemoryRow[];
-  }
-  return getDb()
-    .prepare("SELECT * FROM memories ORDER BY updated_at DESC LIMIT 50")
-    .all() as MemoryRow[];
 }
 
 /**
@@ -808,4 +846,66 @@ export function seedToolsFromFile(filePath: string): void {
   });
 
   seedMany();
+}
+
+// ── User GitHub tokens ──
+
+export interface UserGithubTokenRow {
+  user_id: string;
+  encrypted_token: string;
+  token_iv: string;
+  token_tag: string;
+  github_username: string;
+  github_name: string;
+  github_email: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export function saveUserGithubToken(
+  userId: string,
+  encToken: string,
+  iv: string,
+  tag: string,
+  username: string,
+  name: string,
+  email: string,
+): void {
+  getDb()
+    .prepare(`
+      INSERT OR REPLACE INTO user_github_tokens
+        (user_id, encrypted_token, token_iv, token_tag, github_username, github_name, github_email, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())
+    `)
+    .run(userId, encToken, iv, tag, username, name, email);
+}
+
+export function getUserGithubToken(userId: string): UserGithubTokenRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM user_github_tokens WHERE user_id = ?")
+    .get(userId) as UserGithubTokenRow | undefined;
+}
+
+export function getUserGithubPAT(userId: string): {
+  token: string;
+  username: string;
+  name: string;
+  email: string;
+} | undefined {
+  const row = getUserGithubToken(userId);
+  if (!row) return undefined;
+  const token = decrypt(row.encrypted_token, row.token_iv, row.token_tag);
+  return {
+    token,
+    username: row.github_username,
+    name: row.github_name,
+    email: row.github_email,
+  };
+}
+
+export function deleteUserGithubToken(userId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM user_github_tokens WHERE user_id = ?")
+    .run(userId);
+  return result.changes > 0;
 }

@@ -6,7 +6,7 @@
  * with a single parameterized builder.
  */
 import { getToolInstructions } from "./tools.js";
-import { readRepoContextFiles } from "./context-gen.js";
+import { readRepoContextFiles, readRepoOverview } from "./context-gen.js";
 import { getGlobalKnowledge } from "./knowledge.js";
 import type { SlackContext } from "./utils/slack-context.js";
 
@@ -45,7 +45,7 @@ const FOLLOW_UP_REMINDERS: Record<PrefixMode, (opts: PrefixOpts) => string> = {
       ? "REMINDER: You are a Q&A assistant. Lead with the direct answer first. Do NOT suggest code changes or offer to implement anything."
       : "REMINDER: You are a READ-ONLY Q&A assistant. Explain the current state of the codebase only. Do NOT suggest code changes, provide implementation plans, write diffs, or offer to implement anything. Lead with the direct answer first.";
     const repoReminder = opts.repo
-      ? ` Focus on the \`${opts.repo.name}\` repo at \`${opts.repo.dir}\`. Only look at other repos if the user explicitly asks.`
+      ? ` Default to the \`${opts.repo.name}\` repo at \`${opts.repo.dir}\`, but search other repos if relevant.`
       : "";
     return `${core}${toolReminder}${repoReminder}`;
   },
@@ -112,21 +112,41 @@ function buildQAInstructions(opts: PrefixOpts): string[] {
 
   if (opts.repo) {
     lines.push(
-      "", "REPOSITORY SCOPE:",
-      `Your PRIMARY repository is \`${repoName}\`, located at \`${opts.repo.dir}\`.`,
-      `When running bash commands (grep, find, cat, ls, etc.), default to \`${opts.repo.dir}\` as your working directory.`,
-      "Only search or read files within this repository unless the user explicitly asks about another repo.",
-      "Always cite file paths relative to this repo root (e.g. \`src/models/foo.ts\`) rather than absolute paths when possible.",
+      "", "REPOSITORY ACCESS:",
+      `Your primary repository is \`${repoName}\` at \`${opts.repo.dir}\`. Default your working directory there.`,
+      "You have access to ALL repositories listed below. When answering questions:",
+      "- Default to the primary repo, but proactively search other repos when the question",
+      "  involves cross-repo concerns (API contracts, shared libraries, deployment, data flow).",
+      "- When citing files from a non-primary repo, prefix with the repo name: \`reponame:path/to/file.ts\`.",
+      "- You can read deeper context (directory-map.md, key-abstractions.md, conventions.md) from",
+      "  any repo's .opencode/rules/ directory if you need more detail beyond the overview.",
     );
-    if (opts.repo.otherRepos && opts.repo.otherRepos.length > 0) {
-      lines.push(
-        "", "Other repositories are available and you may reference them ONLY when the user explicitly asks about them:",
-      );
+
+    // Build <available_repos> block with overviews
+    const allRepos: Array<{ name: string; dir: string; isPrimary: boolean }> = [
+      { name: opts.repo.name, dir: opts.repo.dir, isPrimary: true },
+    ];
+    if (opts.repo.otherRepos) {
       for (const other of opts.repo.otherRepos) {
-        lines.push(`- \`${other.name}\` at \`${other.dir}\``);
+        allRepos.push({ name: other.name, dir: other.dir, isPrimary: false });
       }
-      lines.push("If the user asks about a different repo by name, use that repo's path. Otherwise, stay within your primary repo.");
     }
+
+    const repoSections: string[] = [];
+    for (const r of allRepos) {
+      const label = r.isPrimary ? `${r.name} (primary)` : r.name;
+      const overview = readRepoOverview(r.dir);
+      const overviewBlock = overview
+        ? `<overview>\n${overview}\n</overview>`
+        : "(overview not yet generated)";
+      repoSections.push(
+        `## ${label} — ${r.dir}`,
+        overviewBlock,
+        `Context files: ${r.dir}/.opencode/rules/`,
+      );
+    }
+
+    lines.push("", "<available_repos>", ...repoSections, "</available_repos>");
   }
 
   return lines;
@@ -320,7 +340,10 @@ export function buildPrefix(opts: PrefixOpts): string {
   // Security line
   lines.push("", SECURITY_LINE);
 
-  // Repo context injection for non-default repos (Q&A) or coding/planning modes
+  // Repo context injection: OpenCode already loads .opencode/rules/*.md as system
+  // instructions for the primary repo, so we only inject full context for non-default
+  // repos (where the session directory doesn't match the repo).
+  // Coding/planning sessions always need it since they may use a different working dir.
   if (mode === "qa" && repo && !repo.isDefault) {
     appendRepoContext(lines, repo.name, repo.dir);
   } else if ((mode === "coding" || mode === "planning") && repoDir) {
