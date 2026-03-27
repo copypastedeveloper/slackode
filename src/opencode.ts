@@ -37,6 +37,30 @@ export function getBaseUrl(): string {
   return baseUrl;
 }
 
+/**
+ * Auto-allow a permission prompt so the session doesn't hang.
+ * Shared by Q&A, context-gen, and coding session SSE loops.
+ */
+export async function autoAllowPermission(
+  sseClient: OpencodeClient,
+  sessionId: string,
+  perm: { id: string; type?: string; pattern?: unknown; title?: string },
+  label: string,
+): Promise<void> {
+  console.warn(
+    `[${label}] Permission prompt blocked session ${sessionId}: ` +
+    `type=${perm.type} pattern=${JSON.stringify(perm.pattern)}${perm.title ? ` title="${perm.title}"` : ""} — auto-allowing`,
+  );
+  try {
+    await sseClient.postSessionIdPermissionsPermissionId({
+      path: { id: sessionId, permissionID: perm.id },
+      body: { response: "once" },
+    });
+  } catch (err) {
+    console.error(`[${label}] Failed to auto-allow permission ${perm.id}:`, err);
+  }
+}
+
 export async function createSession(title: string, directory?: string): Promise<string> {
   const result = await getClient().session.create({
     body: { title },
@@ -304,19 +328,7 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
       } else if (evt.type === "permission.updated") {
         const perm = evt.properties;
         if (perm.sessionID === sessionId) {
-          console.warn(
-            `[opencode] Permission prompt blocked session ${sessionId}: ` +
-            `type=${perm.type} pattern=${JSON.stringify(perm.pattern)} title="${perm.title}" — auto-allowing`,
-          );
-          // Auto-allow so the session doesn't hang forever
-          try {
-            await sseClient.postSessionIdPermissionsPermissionId({
-              path: { id: sessionId, permissionID: perm.id },
-              body: { response: "once" },
-            });
-          } catch (err) {
-            console.error(`[opencode] Failed to auto-allow permission ${perm.id}:`, err);
-          }
+          await autoAllowPermission(sseClient, sessionId, perm, "opencode");
         }
       } else if (evt.type === "session.idle") {
         if (evt.properties.sessionID === sessionId) {

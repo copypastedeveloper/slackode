@@ -84,6 +84,7 @@ export async function handleGithubCommand(
   userId: string,
   threadTs: string,
   client: WebClient,
+  eventTs?: string,
 ): Promise<string | undefined> {
   const match = text.match(/^github\s+(connect|disconnect|status)(?:\s+([\s\S]*))?$/i);
   if (!match) return undefined;
@@ -109,6 +110,10 @@ export async function handleGithubCommand(
 
     try {
       const info = await validateAndStoreGithubPAT(userId, arg);
+      // Delete the DM containing the plaintext PAT for security
+      if (eventTs) {
+        try { await client.chat.delete({ channel: channelId, ts: eventTs }); } catch { /* best effort */ }
+      }
       return `GitHub connected! Commits and PRs will be attributed to *${info.name}* (${info.username}, ${info.email}).`;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

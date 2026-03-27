@@ -5,7 +5,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
-import { getClient, createSession, getBaseUrl } from "./opencode.js";
+import { getClient, createSession, getBaseUrl, autoAllowPermission } from "./opencode.js";
 
 const CONTEXT_FILE_NAMES = [
   ".opencode/rules/repo-overview.md",
@@ -276,18 +276,7 @@ export async function generateContext(repoDir: string, repoName: string): Promis
       if (evt.type === "permission.updated") {
         const perm = evt.properties;
         if (perm.sessionID === sessionId) {
-          console.warn(
-            `[context-gen] Permission prompt blocked session ${sessionId}: ` +
-            `type=${perm.type} pattern=${JSON.stringify(perm.pattern)} — auto-allowing`,
-          );
-          try {
-            await sseClient.postSessionIdPermissionsPermissionId({
-              path: { id: sessionId, permissionID: perm.id },
-              body: { response: "once" },
-            });
-          } catch (err) {
-            console.error(`[context-gen] Failed to auto-allow permission ${perm.id}:`, err);
-          }
+          await autoAllowPermission(sseClient, sessionId, perm, "context-gen");
         }
       }
 

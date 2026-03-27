@@ -720,7 +720,8 @@ async function createSessionAndProceed(opts: CodeStartOpts & { repoName?: string
       }
     }
 
-    // No agent selection needed — proceed immediately
+    // No agent selection needed — clean up any pending request and proceed
+    pendingCodingRequests.delete(threadTs);
     const agentLabel = session.agent !== "code" ? `\nAgent: \`${session.agent}\`` : "";
 
     const startText = `*Coding session started!*\nRepo: \`${session.repoName}\`\nBranch: \`${session.branch}\`${agentLabel}\n\n_Processing your request..._`;

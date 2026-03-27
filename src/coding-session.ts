@@ -530,7 +530,7 @@ export async function createCodingSessionPR(
   // Push branch using user's PAT via GIT_ASKPASS
   const shortKey = threadKey.replace(".", "-");
   const askpassPath = `/tmp/git-askpass-${shortKey}.sh`;
-  writeFileSync(askpassPath, `#!/bin/sh\necho "${userPat.token}"\n`, { mode: 0o700 });
+  writeFileSync(askpassPath, `#!/bin/sh\necho '${userPat.token}'\n`, { mode: 0o700 });
   try {
     execFileSync("git", ["push", "-u", "origin", row.branch], {
       cwd, encoding: "utf-8",

@@ -33,13 +33,6 @@ export const BlockPrefix = {
 
 export const GITHUB_CONNECT_MODAL_CALLBACK = "github_connect_modal";
 
-// ── Git identity for bot commits ──
-
-export const GIT_AUTHOR = {
-  name: "Slackode Bot",
-  email: "bot@slackode.dev",
-} as const;
-
 // ── Paths that should never be committed from coding worktrees ──
 
 export const BOT_MANAGED_PATHS = [".opencode", ".claude", ".agents", "opencode.json"] as const;

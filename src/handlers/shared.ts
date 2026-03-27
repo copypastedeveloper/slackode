@@ -96,14 +96,12 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     }
 
     // ── Admin-only: tool add conversation flow ──
-    const addReply = advanceToolAdd(channelId, userId, question);
-    if (addReply) {
-      if (!hasRole(userId, "admin")) {
-        await denyAccess(client, channelId, userId, threadTs, "admin");
+    if (hasRole(userId, "admin")) {
+      const addReply = advanceToolAdd(channelId, userId, question);
+      if (addReply) {
+        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: addReply });
         return;
       }
-      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: addReply });
-      return;
     }
 
     // ── Open to all: channel-scoped config ──
@@ -139,7 +137,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
 
     // ── GitHub PAT management (connect/disconnect/status) ──
     if (/^github\s+/i.test(question)) {
-      const githubReply = await handleGithubCommand(question, channelId, channelType, userId, threadTs, client);
+      const githubReply = await handleGithubCommand(question, channelId, channelType, userId, threadTs, client, eventTs);
       if (githubReply !== undefined) {
         if (githubReply.length > 0) {
           await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: githubReply });
