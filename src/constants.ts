@@ -9,10 +9,15 @@ export const Action = {
   CODING_REVISE: "coding_revise",
   /** Prefix for agent selection buttons: select_agent_0, select_agent_1, etc. */
   SELECT_AGENT_PREFIX: "select_agent_",
+  /** Prefix for repo selection buttons: select_repo_0, select_repo_1, etc. */
+  SELECT_REPO_PREFIX: "select_repo_",
 } as const;
 
 /** Maximum number of agent selection buttons (Slack allows 5 elements per actions block). */
 export const MAX_AGENT_BUTTONS = 5;
+
+/** Maximum number of repo selection buttons (Slack allows 5 elements per actions block). */
+export const MAX_REPO_BUTTONS = 5;
 
 // ── Slack block ID prefixes ──
 
@@ -21,6 +26,7 @@ export const BlockPrefix = {
   CODING_PR: "coding_pr_",
   CODING_PLAN: "coding_plan_",
   AGENT_SELECT: "agent_select_",
+  REPO_SELECT: "repo_select_",
 } as const;
 
 // ── Git identity for bot commits ──

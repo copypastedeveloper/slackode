@@ -11,8 +11,8 @@ import {
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
-import { resumeCodingWithAgent, handleApprove, handleRevise } from "./handlers/coding-handler.js";
-import { Action, MAX_AGENT_BUTTONS } from "./constants.js";
+import { resumeCodingWithAgent, resumeCodingWithRepo, handleApprove, handleRevise } from "./handlers/coding-handler.js";
+import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS } from "./constants.js";
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN;
@@ -81,6 +81,18 @@ app.action(Action.CODING_DONE, async ({ action, ack, body, client }) => {
   const reply = await handlePR(threadTs, body.user.id, undefined, true);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
+
+// Repo selection buttons (select_repo_0 through select_repo_N)
+for (let i = 0; i < MAX_REPO_BUTTONS; i++) {
+  app.action(`${Action.SELECT_REPO_PREFIX}${i}`, async ({ action, ack, body, client }) => {
+    await ack();
+    const { threadTs, repoName } = JSON.parse((action as { value: string }).value);
+    const channel = (body as { channel?: { id: string } }).channel?.id;
+    if (!channel) return;
+    if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
+    await resumeCodingWithRepo(threadTs, repoName, client, channel);
+  });
+}
 
 // Agent selection buttons (select_agent_0 through select_agent_N)
 for (let i = 0; i < MAX_AGENT_BUTTONS; i++) {

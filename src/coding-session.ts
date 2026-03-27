@@ -116,6 +116,7 @@ export async function createCodingSession(
   channelId: string,
   agent: string = "code",
   description?: string,
+  repoNameOverride?: string,
 ): Promise<CodingSession> {
   // Check session limit
   const active = getActiveCodingSessions();
@@ -126,15 +127,22 @@ export async function createCodingSession(
     );
   }
 
-  // Resolve repo for this channel
-  const repoInfo = resolveRepoForChannel(channelId);
-  if (!repoInfo) {
-    throw new Error("No repository configured for this channel. Use `repo add` first.");
-  }
-
-  const repoRow = getRepo(repoInfo.name);
-  if (!repoRow) {
-    throw new Error(`Repository '${repoInfo.name}' not found.`);
+  // Resolve repo: use override if provided, otherwise resolve from channel
+  let repoRow;
+  if (repoNameOverride) {
+    repoRow = getRepo(repoNameOverride);
+    if (!repoRow || !repoRow.enabled) {
+      throw new Error(`Repository '${repoNameOverride}' not found or disabled.`);
+    }
+  } else {
+    const repoInfo = resolveRepoForChannel(channelId);
+    if (!repoInfo) {
+      throw new Error("No repository configured for this channel. Use `repo add` first.");
+    }
+    repoRow = getRepo(repoInfo.name);
+    if (!repoRow) {
+      throw new Error(`Repository '${repoInfo.name}' not found.`);
+    }
   }
 
   const repoDir = repoRow.dir;
@@ -207,7 +215,7 @@ export async function createCodingSession(
     threadKey,
     userId,
     channelId,
-    repoName: repoInfo.name,
+    repoName: repoRow.name,
     branch,
     worktreePath: worktreeDir,
     port,
@@ -243,7 +251,7 @@ export async function createCodingSession(
     threadKey,
     userId,
     channelId,
-    repoName: repoInfo.name,
+    repoName: repoRow.name,
     branch,
     worktreePath: worktreeDir,
     port,
