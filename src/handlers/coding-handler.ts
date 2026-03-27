@@ -308,10 +308,22 @@ interface PendingCodingRequest {
   isThread: boolean;
   botUserId?: string;
   repoName?: string;
-  startMsgTs?: string;
   agent?: string;
+  /** Timestamp (ms) when the pending request was created — used for TTL cleanup. */
+  createdAt: number;
 }
 const pendingCodingRequests = new Map<string, PendingCodingRequest>();
+const PENDING_REQUEST_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** Purge pending requests older than PENDING_REQUEST_TTL_MS. */
+function purgeStalePendingRequests(): void {
+  const now = Date.now();
+  for (const [key, req] of pendingCodingRequests) {
+    if (now - req.createdAt > PENDING_REQUEST_TTL_MS) {
+      pendingCodingRequests.delete(key);
+    }
+  }
+}
 
 /**
  * Resume a pending coding request after agent selection via button click.
@@ -517,12 +529,13 @@ export async function handleCodeStart(opts: CodeStartOpts): Promise<void> {
   const { description, agent, channelId, userId, threadTs, client, slackCtx, files: eventFiles, isThread, botUserId } = opts;
 
   // ── PAT gate: require GitHub connection before starting a coding session ──
+  purgeStalePendingRequests();
   const ghToken = getUserGithubToken(userId);
   if (!ghToken) {
     // Store pending request so we can resume after PAT connect
     pendingCodingRequests.set(threadTs, {
       description, agent, channelId, userId, threadTs, client, slackCtx,
-      files: eventFiles, isThread, botUserId,
+      files: eventFiles, isThread, botUserId, createdAt: Date.now(),
     });
 
     await client.chat.postMessage({
@@ -591,7 +604,7 @@ export async function handleCodeStart(opts: CodeStartOpts): Promise<void> {
     // Store pending request — session created after repo selection
     pendingCodingRequests.set(threadTs, {
       description, channelId, userId, threadTs, client, slackCtx,
-      files: eventFiles, isThread, botUserId,
+      files: eventFiles, isThread, botUserId, createdAt: Date.now(),
     });
     return;
   }
@@ -671,7 +684,7 @@ async function createSessionAndProceed(opts: CodeStartOpts & { repoName?: string
         // Store/update pending request and show agent selection
         pendingCodingRequests.set(threadTs, {
           description: enrichedDescription, channelId, userId, threadTs, client, slackCtx,
-          files: eventFiles, isThread, botUserId, repoName,
+          files: eventFiles, isThread, botUserId, repoName, createdAt: Date.now(),
         });
 
         const agentButtons: KnownBlock = {

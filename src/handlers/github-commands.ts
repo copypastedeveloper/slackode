@@ -1,9 +1,14 @@
 import type { WebClient } from "@slack/web-api";
 import { encrypt } from "../crypto.js";
 import {
-  saveUserGithubToken, getUserGithubToken, getUserGithubPAT,
+  saveUserGithubToken, getUserGithubPAT,
   deleteUserGithubToken,
 } from "../sessions.js";
+
+/** Build standard GitHub API headers for a given PAT. */
+function githubHeaders(pat: string): Record<string, string> {
+  return { Authorization: `Bearer ${pat}`, Accept: "application/vnd.github+json" };
+}
 
 /**
  * Validate a GitHub PAT, fetch user info, encrypt, and store.
@@ -16,10 +21,7 @@ export async function validateAndStoreGithubPAT(
 ): Promise<{ username: string; name: string; email: string }> {
   // Validate via GitHub API
   const userResp = await fetch("https://api.github.com/user", {
-    headers: {
-      Authorization: `Bearer ${pat}`,
-      Accept: "application/vnd.github+json",
-    },
+    headers: githubHeaders(pat),
   });
 
   if (!userResp.ok) {
@@ -40,10 +42,7 @@ export async function validateAndStoreGithubPAT(
     // Try to get primary verified email
     try {
       const emailsResp = await fetch("https://api.github.com/user/emails", {
-        headers: {
-          Authorization: `Bearer ${pat}`,
-          Accept: "application/vnd.github+json",
-        },
+        headers: githubHeaders(pat),
       });
       if (emailsResp.ok) {
         const emails = (await emailsResp.json()) as Array<{
@@ -125,11 +124,11 @@ export async function handleGithubCommand(
   }
 
   if (subcommand === "status") {
-    const row = getUserGithubToken(userId);
-    if (!row) {
+    const info = getUserGithubPAT(userId);
+    if (!info) {
       return "No GitHub account connected. Run `github connect <pat>` to connect.";
     }
-    return `GitHub connected as *${row.github_name}* (\`${row.github_username}\`, ${row.github_email}).`;
+    return `GitHub connected as *${info.name}* (\`${info.username}\`, ${info.email}).`;
   }
 
   return undefined;
