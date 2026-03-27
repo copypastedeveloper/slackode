@@ -37,9 +37,10 @@ export function getBaseUrl(): string {
   return baseUrl;
 }
 
-export async function createSession(title: string): Promise<string> {
+export async function createSession(title: string, directory?: string): Promise<string> {
   const result = await getClient().session.create({
     body: { title },
+    ...(directory ? { query: { directory } } : {}),
   });
 
   if (!result.data) {
@@ -225,6 +226,7 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   let done = false;
   let answerCaptured = false;
   let compacted = false;
+  let skipNextStop = false;  // After compaction, skip the auto-continue's garbage stop
   let assistantMessageId: string | undefined;
 
   const TIMEOUT_MS = 10 * 60 * 1000;
@@ -277,14 +279,43 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
         } else if (part.type === "compaction") {
           console.log(`[opencode] Compaction event for session ${sessionId}`);
           compacted = true;
+          skipNextStop = true;  // The auto-continue after compaction produces a garbage summary; skip it
           assistantMessageId = undefined;
           latestText = "";
           activeTools.clear();
         } else if (part.type === "step-finish") {
           const reason = (part as { reason?: string }).reason;
           if (reason === "stop") {
+            if (skipNextStop) {
+              // This is the auto-continue's compaction summary — discard it and keep listening
+              console.log(`[opencode] Skipping post-compaction auto-continue stop for session ${sessionId}`);
+              skipNextStop = false;
+              assistantMessageId = undefined;
+              latestText = "";
+              continue;
+            }
             answerCaptured = true;
             postAnswerTimeout = setTimeout(() => { done = true; }, 30_000);
+          } else if (reason === "tool-calls" && skipNextStop) {
+            // Agent is doing real work after compaction — don't skip its eventual stop
+            skipNextStop = false;
+          }
+        }
+      } else if (evt.type === "permission.updated") {
+        const perm = evt.properties;
+        if (perm.sessionID === sessionId) {
+          console.warn(
+            `[opencode] Permission prompt blocked session ${sessionId}: ` +
+            `type=${perm.type} pattern=${JSON.stringify(perm.pattern)} title="${perm.title}" — auto-allowing`,
+          );
+          // Auto-allow so the session doesn't hang forever
+          try {
+            await sseClient.postSessionIdPermissionsPermissionId({
+              path: { id: sessionId, permissionID: perm.id },
+              body: { response: "once" },
+            });
+          } catch (err) {
+            console.error(`[opencode] Failed to auto-allow permission ${perm.id}:`, err);
           }
         }
       } else if (evt.type === "session.idle") {

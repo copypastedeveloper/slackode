@@ -71,6 +71,19 @@ function getChangesSince(repoDir: string, fromSha: string): { log: string; diffs
 }
 
 /**
+ * Read only the repo-overview.md for a given repo directory.
+ * Returns the content string or null if missing/unreadable.
+ */
+export function readRepoOverview(repoDir: string): string | null {
+  const overviewPath = path.join(repoDir, ".opencode/rules/repo-overview.md");
+  try {
+    return readFileSync(overviewPath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Read the current contents of all context files for a given repo directory.
  * Exported so that the OpenCode client can include non-default repo context in prompts.
  */
@@ -90,47 +103,43 @@ export function readRepoContextFiles(repoDir: string): string {
  * Build the prompt for a full context generation (first run).
  */
 function buildFullGenPrompt(repoName: string): string {
-  return `You are a codebase analyst. Your job is to explore the ${repoName} repository and write reference documentation files that will be used as context by a Q&A assistant.
+  return `You are a codebase analyst. Explore the ${repoName} repository and write 4 concise reference documentation files.
 
-Explore the repository thoroughly — look at the directory structure, key config files (package.json, Pipfile, pyproject.toml, go.mod, Cargo.toml, Gemfile, Dockerfile, etc.), important source directories, and recent git history.
+Look at directory structure, config files, key source directories, and recent git history. Then write the following files using the write tool.
 
-Then write the following 4 files using the write tool. Each file should be concise, accurate, and useful for someone answering questions about this codebase.
+## File 1: .opencode/rules/repo-overview.md (target: 80-120 lines)
 
-## File 1: .opencode/rules/repo-overview.md
+- What the project is and does
+- Tech stack (languages, frameworks, databases — only confirmed)
+- Top-level directory layout with brief descriptions
 
-A high-level overview:
-- What the project is and what it does (infer from README, config files, and code structure)
-- Tech stack (languages, frameworks, databases, infrastructure — only what you can confirm exists)
-- Top-level directory layout with brief descriptions of what each directory contains
+## File 2: .opencode/rules/directory-map.md (target: 100-200 lines)
 
-## File 2: .opencode/rules/directory-map.md
+Navigational map of important directories, 1-2 levels deep. Focus on business logic, APIs, data models, config. Skip node_modules, dist, build, migrations, __pycache__.
 
-A navigational map of the most important directories, showing their internal structure (1-2 levels deep). Focus on directories that contain business logic, API definitions, data models, and configuration. Skip boilerplate directories (node_modules, dist, build, migrations, __pycache__).
+## File 3: .opencode/rules/key-abstractions.md (target: 100-200 lines)
 
-## File 3: .opencode/rules/key-abstractions.md
-
-An inventory of the key domain abstractions:
-- Data models / entities (with file paths and class/struct/type names)
-- API endpoints / routes (with file paths)
-- Service layers / business logic modules
+Key domain abstractions with file paths:
+- Data models / entities (top 20-30 most important, not exhaustive)
+- API endpoints / route files (list the route modules, not every endpoint)
+- Major service layers / business logic modules
 - Background jobs / async tasks
-- Configuration systems
-Only include what actually exists. Cite file paths.
+Only include what exists. Cite file paths. Prioritize breadth over depth — a Q&A agent can always read files for detail.
 
-## File 4: .opencode/rules/conventions.md
+## File 4: .opencode/rules/conventions.md (target: 80-150 lines)
 
-Patterns and conventions used in the codebase:
-- File organization patterns (how code is structured within modules/packages)
+- File organization patterns
 - Naming conventions
 - Testing patterns and test file locations
 - Configuration file locations
-- Any monorepo/workspace structure
-- Recently active areas (use git log to find the most-changed files in the last 100 commits)
+- Monorepo/workspace structure
+- Top 10 most-changed files from last 100 commits
 
-IMPORTANT:
-- Only document what you can actually verify exists in the repo. Do NOT guess or hallucinate.
-- Be concise. Each file should be useful as quick reference, not exhaustive documentation.
-- Use markdown formatting with headers, tables, and code blocks.
+CRITICAL RULES:
+- Each file MUST be under 250 lines. Aim for the target line counts above.
+- Only document what you can verify. Do NOT guess or hallucinate.
+- These files are quick-reference guides, not exhaustive documentation. The Q&A agent can read source files for details.
+- Use markdown formatting. Be terse — tables are preferred over prose.
 - Write all 4 files, then stop.`;
 }
 
@@ -172,14 +181,14 @@ Review the commits and changes above. Determine whether any of the 4 context fil
 - Structural changes to the codebase organization
 - Shifts in which areas are most actively developed
 
-If a file needs updates, rewrite it with the write tool. If a file is still accurate, skip it — do NOT rewrite files that don't need changes.
+If a file needs updates, rewrite it completely with the write tool (do not use edit/patch — write the whole file). If a file is still accurate, skip it.
 
-If the changes are minor (e.g. bug fixes, test updates, documentation tweaks) and don't affect the codebase structure or conventions, it's fine to skip all files. Just say "No context updates needed" and stop.
+If the changes are minor (bug fixes, test updates, documentation tweaks) and don't affect structure or conventions, say "No context updates needed" and stop.
 
-IMPORTANT:
-- Only document what you can actually verify exists in the repo. Do NOT guess or hallucinate.
-- You can use bash, read, grep, glob to inspect the repo if needed to verify changes.
-- Be concise. Each file should be useful as quick reference, not exhaustive documentation.
+CRITICAL RULES:
+- Each file MUST be under 250 lines. If a file is currently over 250 lines, rewrite it shorter even if the content hasn't changed.
+- Only document what you can verify. Do NOT guess or hallucinate.
+- These are quick-reference guides, not exhaustive documentation.
 - Write only the files that need updating, then stop.`;
 }
 
@@ -232,8 +241,8 @@ export async function generateContext(repoDir: string, repoName: string): Promis
     console.log(`[context-gen] Starting incremental context update (${lastSha.slice(0, 8)}..${currentSha.slice(0, 8)})...`);
   }
 
-  // Create a session and fire the prompt
-  const sessionId = await createSession(`Context ${mode}: ${repoName}`);
+  // Create a session in the target repo's directory
+  const sessionId = await createSession(`Context ${mode}: ${repoName}`, repoDir);
   console.log(`[context-gen] Session created: ${sessionId}`);
 
   // Subscribe to SSE BEFORE sending the prompt
@@ -262,6 +271,24 @@ export async function generateContext(repoDir: string, repoName: string): Promis
       if (evt.type === "session.idle" && evt.properties.sessionID === sessionId) {
         done = true;
         break;
+      }
+
+      if (evt.type === "permission.updated") {
+        const perm = evt.properties;
+        if (perm.sessionID === sessionId) {
+          console.warn(
+            `[context-gen] Permission prompt blocked session ${sessionId}: ` +
+            `type=${perm.type} pattern=${JSON.stringify(perm.pattern)} — auto-allowing`,
+          );
+          try {
+            await sseClient.postSessionIdPermissionsPermissionId({
+              path: { id: sessionId, permissionID: perm.id },
+              body: { response: "once" },
+            });
+          } catch (err) {
+            console.error(`[context-gen] Failed to auto-allow permission ${perm.id}:`, err);
+          }
+        }
       }
 
       if (evt.type === "message.part.updated") {
