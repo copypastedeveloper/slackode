@@ -7,6 +7,7 @@
  */
 import { getToolInstructions } from "./tools.js";
 import { readRepoContextFiles, readRepoOverview } from "./context-gen.js";
+import { getGlobalKnowledge } from "./knowledge.js";
 import type { SlackContext } from "./utils/slack-context.js";
 
 export type PrefixMode = "qa" | "coding" | "planning" | "minimal-coding" | "minimal-planning";
@@ -313,6 +314,28 @@ export function buildPrefix(opts: PrefixOpts): string {
 
   // Mode-specific instruction block
   lines.push(...INSTRUCTION_BUILDERS[mode](opts));
+
+  // Corporate knowledge injection (global only — repo/channel available via tools)
+  const globalKnowledge = getGlobalKnowledge();
+  if (globalKnowledge) {
+    lines.push(
+      "",
+      "<corporate_knowledge>",
+      globalKnowledge,
+      "</corporate_knowledge>",
+    );
+  }
+
+  // Hint about on-demand knowledge and memory tools
+  lines.push(
+    "",
+    "KNOWLEDGE & MEMORY TOOLS:",
+    "You have `search_knowledge`, `recall_memories`, and `save_memory` tools available.",
+    "- Use `search_knowledge` when you need company guidelines, coding standards, or repo/channel-specific documentation.",
+    "- Use `recall_memories` when you need past decisions, conventions, or corrections the team has saved.",
+    "- Use `save_memory` to proactively save important information: when a user corrects you, states a convention (\"we always...\", \"we never...\"), makes a decision, or shares institutional knowledge that future conversations should know. Save it without asking — just do it and briefly mention you did.",
+    "Use these tools proactively when the question touches on conventions, standards, or institutional knowledge.",
+  );
 
   // Security line
   lines.push("", SECURITY_LINE);

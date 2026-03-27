@@ -24,6 +24,7 @@ import { handleRoleCommand } from "./role-commands.js";
 import { handleGithubCommand } from "./github-commands.js";
 import { handleCodeCommand } from "./code-commands.js";
 import { handleCodingMessage, handleCodeStart } from "./coding-handler.js";
+import { handleMemoryCommand } from "./memory-commands.js";
 
 /** Send an ephemeral denial message visible only to the requesting user. */
 async function denyAccess(
@@ -144,6 +145,12 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
         }
         return;
       }
+    }
+
+    const memoryReply = await handleMemoryCommand(question, channelId, userId);
+    if (memoryReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: memoryReply });
+      return;
     }
   }
 

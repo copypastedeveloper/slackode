@@ -129,6 +129,9 @@ fi
 # ── Create directory for additional repos (multi-repo support) ──
 mkdir -p /app/repos
 
+# ── Create knowledge directory for S3-synced knowledge files ──
+mkdir -p /app/knowledge
+
 # ── Clean up orphaned coding session worktrees and processes ──
 echo "Cleaning up orphaned coding sessions..."
 # Prune worktrees on the default repo
