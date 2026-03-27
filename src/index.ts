@@ -1,7 +1,7 @@
 import bolt from "@slack/bolt";
 const { App } = bolt;
 import { initOpencode } from "./opencode.js";
-import { closeDb, seedToolsFromFile } from "./sessions.js";
+import { closeDb, seedToolsFromFile, bootstrapAdmins, hasRole } from "./sessions.js";
 import { writeOpencodeConfig } from "./opencode-config.js";
 import { setRepoDir, startServer, stopServer } from "./opencode-server.js";
 import { initRepos, generateContextForAllRepos } from "./repo-manager.js";
@@ -39,12 +39,25 @@ const app = new App({
 app.event("app_mention", handleMention);
 app.event("message", handleDm);
 
+// Helper: check developer permission for button actions
+async function requireDeveloper(
+  userId: string, channel: string, threadTs: string, client: InstanceType<typeof App>["client"],
+): Promise<boolean> {
+  if (hasRole(userId, "developer")) return true;
+  await client.chat.postEphemeral({
+    channel, user: userId, thread_ts: threadTs,
+    text: "This action requires *developer* permissions. Ask an admin to run `role add @you developer`.",
+  });
+  return false;
+}
+
 // Register coding session button actions
 app.action(Action.CODING_STATUS, async ({ action, ack, body, client }) => {
   await ack();
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handleStatus(threadTs);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
@@ -54,6 +67,7 @@ app.action(Action.CODING_PR, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handlePR(threadTs, body.user.id, undefined, false);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
@@ -63,6 +77,7 @@ app.action(Action.CODING_DONE, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handlePR(threadTs, body.user.id, undefined, true);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
@@ -74,6 +89,7 @@ for (let i = 0; i < MAX_AGENT_BUTTONS; i++) {
     const { threadTs, agent } = JSON.parse((action as { value: string }).value);
     const channel = (body as { channel?: { id: string } }).channel?.id;
     if (!channel) return;
+    if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
     await resumeCodingWithAgent(threadTs, agent, client, channel);
   });
 }
@@ -83,6 +99,7 @@ app.action(Action.CODING_APPROVE, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   await handleApprove(threadTs, body.user.id, client, channel);
 });
 
@@ -91,6 +108,7 @@ app.action(Action.CODING_REVISE, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   await handleRevise(threadTs, body.user.id, client, channel);
 });
 
@@ -99,6 +117,7 @@ app.action(Action.CODING_CANCEL, async ({ action, ack, body, client }) => {
   const threadTs = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   if (!channel) return;
+  if (!(await requireDeveloper(body.user.id, channel, threadTs, client))) return;
   const reply = await handleCancel(threadTs, body.user.id);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
@@ -116,8 +135,16 @@ async function runContextGeneration(): Promise<void> {
 
 // Start the app
 async function start(): Promise<void> {
-  // 1. Seed tools from tools.json on first boot (getDb() is called lazily inside)
+  // 1a. Seed tools from tools.json on first boot (getDb() is called lazily inside)
   seedToolsFromFile(TOOLS_SEED_PATH);
+
+  // 1b. Bootstrap admin users from env
+  const adminUsersEnv = process.env.ADMIN_USERS;
+  if (adminUsersEnv) {
+    const adminIds = adminUsersEnv.split(",").map(s => s.trim()).filter(Boolean);
+    bootstrapAdmins(adminIds);
+    console.log(`[permissions] Bootstrapped ${adminIds.length} admin(s) from ADMIN_USERS`);
+  }
 
   // 2. Generate opencode.json from DB-backed tool config
   setRepoDir(REPO_DIR);

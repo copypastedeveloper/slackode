@@ -6,6 +6,7 @@ import {
   getChannelConfig,
   getChannelAgent, getChannelTools, resolveAgent,
   isSessionCompacted, setSessionCompacted,
+  hasRole,
 } from "../sessions.js";
 import { askQuestion, askForShorterResponse } from "../opencode.js";
 import type { RepoInfo } from "../context-prefix.js";
@@ -19,8 +20,21 @@ import { createProgressUpdater } from "../utils/progress.js";
 import { handleConfigCommand } from "./config-commands.js";
 import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
 import { handleRepoCommand } from "./repo-commands.js";
+import { handleRoleCommand } from "./role-commands.js";
 import { handleCodeCommand } from "./code-commands.js";
 import { handleCodingMessage, handleCodeStart } from "./coding-handler.js";
+
+/** Send an ephemeral denial message visible only to the requesting user. */
+async function denyAccess(
+  client: WebClient, channelId: string, userId: string, threadTs: string, requiredRole: string,
+): Promise<void> {
+  await client.chat.postEphemeral({
+    channel: channelId,
+    user: userId,
+    thread_ts: threadTs,
+    text: `This command requires *${requiredRole}* permissions. Ask an admin to run \`role add @you ${requiredRole}\`.`,
+  });
+}
 
 // ── processIncoming: shared pipeline for DMs and mentions ──
 
@@ -67,18 +81,31 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
   const slackCtx = await getSlackContext(client, userId, channelId, channelType);
 
   if (!hasFiles && question) {
+    // ── Admin-only: tool commands (except "tool list") ──
+    if (/^tool\s+/i.test(question) && !/^tool\s+list$/i.test(question)) {
+      if (!hasRole(userId, "admin")) {
+        await denyAccess(client, channelId, userId, threadTs, "admin");
+        return;
+      }
+    }
     const toolReply = await handleToolCommand(question, channelId, userId, threadTs, client);
     if (toolReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: toolReply });
       return;
     }
 
+    // ── Admin-only: tool add conversation flow ──
     const addReply = advanceToolAdd(channelId, userId, question);
     if (addReply) {
+      if (!hasRole(userId, "admin")) {
+        await denyAccess(client, channelId, userId, threadTs, "admin");
+        return;
+      }
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: addReply });
       return;
     }
 
+    // ── Open to all: channel-scoped config ──
     const configReply = await handleConfigCommand(
       question, channelId, channelName ?? slackCtx.channelName, userId,
     );
@@ -87,17 +114,37 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
       return;
     }
 
+    // ── Admin-only: repo commands ──
+    if (/^repo\s+/i.test(question)) {
+      if (!hasRole(userId, "admin")) {
+        await denyAccess(client, channelId, userId, threadTs, "admin");
+        return;
+      }
+    }
     const repoReply = await handleRepoCommand(question, channelId, userId, threadTs, client);
     if (repoReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: repoReply });
       return;
     }
+
+    // ── Role management (admin-only for add/remove, list open to all) ──
+    const roleReply = await handleRoleCommand(question, channelId, userId, threadTs, client);
+    if (roleReply) {
+      if (roleReply.length > 0) {
+        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: roleReply });
+      }
+      return;
+    }
   }
 
-  // ── Coding session routing ──
+  // ── Coding session routing (developer+ only) ──
   // 1. Check if this thread has an active coding session
   const existingCodingSession = getActiveCodingSession(threadTs);
   if (existingCodingSession) {
+    if (!hasRole(userId, "developer")) {
+      await denyAccess(client, channelId, userId, threadTs, "developer");
+      return;
+    }
     // Check for code-thread commands (status, pr, done, cancel)
     if (question) {
       const codeReply = await handleCodeCommand(question, threadTs, userId, client, channelId);
@@ -128,6 +175,10 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
   if (question) {
     const codeMatch = question.match(/^code\s+([\s\S]+)/i);
     if (codeMatch) {
+      if (!hasRole(userId, "developer")) {
+        await denyAccess(client, channelId, userId, threadTs, "developer");
+        return;
+      }
       let rest = codeMatch[1].trim();
       let agent: string | undefined;
       const agentMatch = rest.match(/^--agent\s+(\S+)\s*([\s\S]*)/i);
