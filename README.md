@@ -12,7 +12,7 @@ A Slack bot that answers questions about your codebase, writes code, and accumul
 4. **Writes code** — start a coding session with `code <description>` and the bot works in an isolated git worktree, then creates a PR when done
 5. **Learns over time** — the bot has a memory system that stores conventions, decisions, and corrections. It saves important things proactively and recalls them via semantic search
 6. **Connects to external services** — plug in MCP tools (Linear, Sentry, etc.) and the bot can look up tickets, errors, and more alongside the codebase
-7. **Syncs corporate knowledge** — optionally pulls company guidelines, coding standards, and repo-specific docs from an S3-compatible bucket
+7. **Manages corporate knowledge** — add company guidelines, coding standards, and repo-specific docs via Slack commands. Searchable via semantic search
 
 ### Q&A features
 
@@ -199,27 +199,29 @@ The bot accumulates institutional knowledge over time — team conventions, deci
 - `repo` — applies to a specific repo (default for `remember:`)
 - `channel` — applies to a specific channel
 
-### Corporate knowledge (S3 sync)
+### Corporate knowledge
 
-Optionally sync markdown files from an S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, etc.) to inject company-wide context:
+Manage company-wide knowledge directly from Slack. Entries are stored in SQLite, indexed for semantic search, and injected into the agent's context.
 
+**Scopes:**
+- `global` — injected into every session's prompt
+- `repo` — repo-specific guidelines (default scope when channel has a repo assigned)
+- `channel` — channel-specific context
+
+**Commands:**
 ```
-your-bucket/
-  global/company.md              → injected into every new session
-  global/coding-standards.md     → searchable via agent tools
-  repos/{repo-name}/guidelines.md → repo-specific knowledge
-  channels/{channel-name}/context.md → channel-specific context
+@Slackode knowledge add API Guidelines: All endpoints must use pagination...
+@Slackode knowledge add --global Coding Standards: We use strict TypeScript...
+@Slackode knowledge add --repo backend Deploy Process: Always run migrations first...
+@Slackode knowledge update #3: Updated content here...
+@Slackode knowledge remove #3
+@Slackode knowledge list
+@Slackode knowledge list --global
+@Slackode knowledge view #3
+@Slackode knowledge import --global          (attach .md files)
 ```
 
-Global knowledge files are injected directly into the agent's prompt for new sessions. Repo and channel knowledge is searchable on demand via the agent's `search_knowledge` tool.
-
-Set the following env vars to enable:
-```env
-KNOWLEDGE_BUCKET=your-bucket-name
-KNOWLEDGE_ENDPOINT=https://s3.us-east-1.amazonaws.com  # or MinIO/R2 endpoint
-# KNOWLEDGE_PREFIX=optional/key/prefix
-# KNOWLEDGE_SYNC_INTERVAL_MS=1800000  # default: 30 min
-```
+`knowledge list` and `knowledge view` are open to all users. All other commands require admin role. The `knowledge import` command accepts attached `.md` files and creates/updates entries from them (filename becomes the title).
 
 ### Repo-level knowledge (.opencode/rules/)
 
@@ -294,16 +296,14 @@ Adding, removing, enabling, disabling, or setting a key for a tool automatically
 │  │SQLite│ │ │Lance │  │ Repos    │  │ Knowledge MCP │    │
 │  │  DB  │ │ │  DB  │  │ + Rules  │  │ Server (stdio)│    │
 │  └─────┘ │ └──────┘  └──────────┘  └───────────────┘    │
-│          │                               │               │
-│          │    ┌──────────────────┐        │               │
-│          └───>│  S3 Knowledge    │<───────┘               │
-│               │  Sync (periodic) │                        │
-│               └──────────────────┘                        │
+│     ▲         ▲                          │               │
+│     │         └──────────────────────────┘               │
+│     │         (indexes knowledge + memories)             │
 └──────────────────────────────────────────────────────────┘
-       │              │                    │
-       v              v                    v
-  Slack API     LLM Provider API     S3 Bucket
-  (Socket Mode) (configurable)       (optional)
+       │              │
+       v              v
+  Slack API     LLM Provider API
+  (Socket Mode) (configurable)
 ```
 
 **Core components:**
@@ -311,9 +311,8 @@ Adding, removing, enabling, disabling, or setting a key for a tool automatically
 - **Slack Bot** — Bolt for JavaScript with Socket Mode. Handles @mentions, DMs, coding sessions, config/tool/repo/memory commands. Manages sessions in SQLite.
 - **OpenCode Server** — Agent runtime with tools (bash, read, grep, glob) and MCP servers. Multiple instances: one for Q&A (port 4096), one per active coding session (ports 4100+).
 - **Knowledge MCP Server** — Local stdio-based MCP server exposing `search_knowledge`, `recall_memories`, and `save_memory` tools. Registered automatically in all agents.
-- **SQLite** — Source of truth for sessions, channel config, tools, repos, and memories.
-- **LanceDB** — Vector search index for semantic memory/knowledge retrieval. Embedded, on-disk, no server needed.
-- **S3 Sync** — Optional periodic sync of markdown knowledge files from an S3-compatible bucket.
+- **SQLite** — Source of truth for sessions, channel config, tools, repos, memories, and knowledge.
+- **LanceDB** — Vector search index for semantic memory/knowledge retrieval. Embedded, on-disk, no server needed. Re-indexes knowledge from SQLite on a periodic interval (default 60s).
 
 **Agent types:**
 - `build` — Read-only Q&A (default)
@@ -385,10 +384,6 @@ For local MCP servers:
 | `MODEL` | No | Model ID (default: `claude-sonnet-4.6`) |
 | `COPILOT_TOKEN` | For github-copilot | GitHub Copilot OAuth token (`gho_...`) |
 | `CONFIG_ENCRYPTION_KEY` | No | 64-char hex key for AES-256-GCM encryption of tool API keys |
-| `KNOWLEDGE_BUCKET` | No | S3 bucket name for corporate knowledge sync |
-| `KNOWLEDGE_ENDPOINT` | No | S3-compatible endpoint URL (for MinIO, R2, etc.) |
-| `KNOWLEDGE_PREFIX` | No | Key prefix within the bucket |
-| `KNOWLEDGE_SYNC_INTERVAL_MS` | No | Sync interval in ms (default: 1800000 / 30 min) |
 | `OPENCODE_URL` | No | OpenCode server URL (default: `http://127.0.0.1:4096`) |
 | `SESSIONS_DB_PATH` | No | Path to sessions SQLite DB |
 
@@ -414,7 +409,7 @@ For the full list, see the [OpenCode providers docs](https://opencode.ai/docs/pr
 | `repo-cache` | `/app/repo` | Default cloned repo |
 | `repos-cache` | `/app/repos` | Additional repos (multi-repo) |
 | `opencode-data` | `/home/appuser/.local/share/opencode` | OpenCode state + sessions DB |
-| `knowledge-cache` | `/app/knowledge` | S3-synced knowledge files + LanceDB vector index |
+| `knowledge-cache` | `/app/knowledge` | LanceDB vector index |
 
 ## Development
 
@@ -435,7 +430,7 @@ src/
 ├── context-gen.ts        # Auto-generates repo context files
 ├── context-prefix.ts     # Builds mode-specific system prompts (Q&A, coding, planning)
 ├── sessions.ts           # SQLite schema + CRUD (sessions, channels, tools, repos, memories)
-├── knowledge.ts          # S3 knowledge sync + file reading
+├── knowledge.ts          # DB-backed knowledge read accessors (used by context prefix)
 ├── tools.ts              # Tool registry helpers
 ├── crypto.ts             # AES-256-GCM encrypt/decrypt for tool API keys
 ├── coding-session.ts     # Worktree management, PR creation, session lifecycle
@@ -450,7 +445,8 @@ src/
 │   ├── repo-commands.ts  # repo add/remove/list/default/pull
 │   ├── code-commands.ts  # Coding thread commands (status, pr, done, cancel)
 │   ├── coding-handler.ts # Coding session orchestration (plan, approve, execute)
-│   └── memory-commands.ts # remember/recall/forget/memories
+│   ├── memory-commands.ts # remember/recall/forget/memories
+│   └── knowledge-commands.ts # knowledge add/update/remove/import/list/view
 ├── mcp/
 │   ├── knowledge-server.ts # MCP server: search_knowledge, recall_memories, save_memory
 │   └── vector-store.ts    # LanceDB vector index + local embeddings (all-MiniLM-L6-v2)
