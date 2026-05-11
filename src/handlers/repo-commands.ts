@@ -2,9 +2,10 @@ import type { WebClient } from "@slack/web-api";
 import { existsSync, rmSync } from "node:fs";
 import {
   getRepo, getAllRepos, getDefaultRepo, removeRepo as dbRemoveRepo,
-  setDefaultRepo as dbSetDefaultRepo,
+  setDefaultRepo as dbSetDefaultRepo, setRepoAllowSkills,
 } from "../sessions.js";
 import { addRepo, pullAllRepos, nameFromUrl } from "../repo-manager.js";
+import { writeSkillManifest } from "../skill-manifest.js";
 
 /**
  * Handle `repo <subcommand>` commands from Slack.
@@ -32,6 +33,7 @@ export async function handleRepoCommand(
       const badges = [
         r.is_default ? "default" : "",
         r.enabled ? "enabled" : "disabled",
+        r.allow_skills ? "skills:on" : "skills:off",
       ].filter(Boolean).join(", ");
       return `\u2022 \`${r.name}\` \u2014 ${r.url} [${badges}]`;
     });
@@ -106,6 +108,22 @@ export async function handleRepoCommand(
     return `Default repo set to \`${name}\`.`;
   }
 
+  // ── repo allow-skills <name> on|off ──
+  const skillsMatch = sub.match(/^allow-skills\s+(\S+)\s+(on|off)$/i);
+  if (skillsMatch) {
+    const name = skillsMatch[1];
+    const allow = skillsMatch[2].toLowerCase() === "on";
+    const repo = getRepo(name);
+    if (!repo) return `Repo \`${name}\` not found.`;
+    setRepoAllowSkills(name, allow);
+    try {
+      writeSkillManifest(repo.dir, { allowSkills: allow });
+    } catch (err) {
+      console.warn(`[repo-commands] Skill manifest refresh failed for ${name}:`, err);
+    }
+    return `Skills for \`${name}\` are now \`${allow ? "on" : "off"}\`. Active sessions will pick this up after their next restart.`;
+  }
+
   // ── repo sync ──
   if (/^sync$/i.test(sub)) {
     await client.chat.postMessage({
@@ -123,6 +141,7 @@ export async function handleRepoCommand(
     "\u2022 `repo add <name> <url>` \u2014 clone and register a new repo",
     "\u2022 `repo remove <name>` \u2014 unregister a repo",
     "\u2022 `repo set-default <name>` \u2014 set the default repo",
+    "\u2022 `repo allow-skills <name> on|off` \u2014 toggle whether the repo's `.claude/skills/` and `.opencode/skill[s]/` are surfaced to the agent",
     "\u2022 `repo sync` \u2014 pull latest for all repos",
   ].join("\n");
 }

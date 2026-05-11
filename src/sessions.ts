@@ -82,10 +82,16 @@ function getDb(): Database.Database {
         dir TEXT NOT NULL,
         is_default INTEGER NOT NULL DEFAULT 0,
         enabled INTEGER NOT NULL DEFAULT 1,
+        allow_skills INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL DEFAULT (unixepoch()),
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    try {
+      db.exec(`ALTER TABLE repos ADD COLUMN allow_skills INTEGER NOT NULL DEFAULT 1`);
+    } catch {
+      // Column already exists — ignore.
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS channel_repos (
         channel_id TEXT PRIMARY KEY,
@@ -455,6 +461,7 @@ export interface RepoRow {
   dir: string;
   is_default: number;
   enabled: number;
+  allow_skills: number;
   created_at: number;
   updated_at: number;
 }
@@ -525,6 +532,12 @@ export function setRepoEnabled(name: string, enabled: boolean): void {
   getDb()
     .prepare("UPDATE repos SET enabled = ?, updated_at = unixepoch() WHERE name = ?")
     .run(enabled ? 1 : 0, name);
+}
+
+export function setRepoAllowSkills(name: string, allow: boolean): void {
+  getDb()
+    .prepare("UPDATE repos SET allow_skills = ?, updated_at = unixepoch() WHERE name = ?")
+    .run(allow ? 1 : 0, name);
 }
 
 // ── Channel-to-repo mapping ──

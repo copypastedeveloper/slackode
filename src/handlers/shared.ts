@@ -26,6 +26,7 @@ import { handleCodeCommand } from "./code-commands.js";
 import { handleCodingMessage, handleCodeStart } from "./coding-handler.js";
 import { handleMemoryCommand } from "./memory-commands.js";
 import { handleKnowledgeCommand, type KnowledgeImportFile } from "./knowledge-commands.js";
+import { handleHelpCommand } from "./help-commands.js";
 
 /** Send an ephemeral denial message visible only to the requesting user. */
 async function denyAccess(
@@ -105,6 +106,13 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
   }
 
   if (!hasFiles && question) {
+    // ── Help (open to all) ──
+    const helpReply = handleHelpCommand(question, userId);
+    if (helpReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: helpReply });
+      return;
+    }
+
     // ── Admin-only: tool commands (except "tool list") ──
     if (/^tool\s+/i.test(question) && !/^tool\s+list$/i.test(question)) {
       if (!hasRole(userId, "admin")) {

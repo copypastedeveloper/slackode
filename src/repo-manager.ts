@@ -7,6 +7,7 @@ import {
   type RepoRow,
 } from "./sessions.js";
 import { generateContext } from "./context-gen.js";
+import { writeSkillManifest } from "./skill-manifest.js";
 import type { RepoInfo } from "./context-prefix.js";
 
 /** Base directory for dynamically added repos. */
@@ -82,19 +83,30 @@ function pullRepo(dir: string): void {
 }
 
 /**
- * Remove agent/skill/plugin files that could override the read-only behavior.
- * Mirrors the clean_repo_agents function in entrypoint.sh.
- * For the default repo, we preserve .opencode/plugin/ (our repo-scope plugin lives there).
+ * Remove repo-supplied files that could override slackode's tool/agent/permission config.
+ *
+ * PRESERVED (skills are inert markdown, surfaced via writeSkillManifest):
+ * - .claude/skills/, .opencode/skill/, .opencode/skills/
+ * - .claude/CLAUDE.md (project instructions)
+ *
+ * REMOVED (can override config or inject hooks):
+ * - .opencode/agents, .opencode/agent (would override agent variants)
+ * - .opencode/plugin[s] (executable; default repo keeps its own slackode plugin)
+ * - .opencode/opencode.json / .opencode/.opencode (config override)
+ * - .claude/agents, .claude/commands, .claude/hooks, .claude/settings*.json
+ * - .agents (legacy)
  */
 function cleanRepoAgents(dir: string): void {
   const isDefault = dir === DEFAULT_REPO_DIR;
   const dirsToRemove = [
-    ".opencode/agents",
+    ".opencode/agents", ".opencode/agent",
     ...(isDefault ? [] : [".opencode/plugin", ".opencode/plugins"]),
-    ".claude", ".agents",
+    ".claude/agents", ".claude/commands", ".claude/hooks",
+    ".agents",
   ];
   const filesToRemove = [
     ".opencode/opencode.json", ".opencode/.opencode",
+    ".claude/settings.json", ".claude/settings.local.json",
   ];
   for (const d of dirsToRemove) {
     const full = path.join(dir, d);
@@ -110,7 +122,7 @@ function cleanRepoAgents(dir: string): void {
  * Ensure the .opencode/rules/ directory exists and copy base rule files
  * into the repo (same as entrypoint.sh does for the default repo).
  */
-function ensureRulesDir(dir: string): void {
+function ensureRulesDir(dir: string, allowSkills: boolean): void {
   const rulesDir = path.join(dir, ".opencode/rules");
   mkdirSync(rulesDir, { recursive: true });
 
@@ -127,6 +139,12 @@ function ensureRulesDir(dir: string): void {
         // Non-fatal — base rules may not exist in dev environments
       }
     }
+  }
+
+  try {
+    writeSkillManifest(dir, { allowSkills });
+  } catch (err) {
+    console.warn(`[repo-manager] Skill manifest generation failed for ${dir}:`, err);
   }
 }
 
@@ -172,7 +190,7 @@ export async function initRepos(): Promise<void> {
         continue;
       }
     }
-    ensureRulesDir(repo.dir);
+    ensureRulesDir(repo.dir, repo.allow_skills === 1);
   }
 }
 
@@ -189,11 +207,13 @@ export async function addRepo(name: string, url: string): Promise<void> {
     cloneRepo(url, dir);
   }
 
-  ensureRulesDir(dir);
-
   // If this is the first repo, make it the default
   const isDefault = getEnabledRepos().length === 0;
   upsertRepo(name, url, dir, isDefault);
+
+  // Default new repos to allow_skills=1 (DB default), so post-upsert lookup is fine.
+  const repo = getRepo(name);
+  ensureRulesDir(dir, repo?.allow_skills === 1);
 
   // Generate context for the new repo (non-blocking)
   generateContext(dir, name).catch((err) => {
@@ -208,6 +228,11 @@ export function pullAllRepos(): void {
   for (const repo of getEnabledRepos()) {
     if (existsSync(path.join(repo.dir, ".git"))) {
       pullRepo(repo.dir);
+      try {
+        writeSkillManifest(repo.dir, { allowSkills: repo.allow_skills === 1 });
+      } catch (err) {
+        console.warn(`[repo-manager] Skill manifest refresh failed for ${repo.name}:`, err);
+      }
     }
   }
 }

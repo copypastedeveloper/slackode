@@ -19,6 +19,7 @@ import {
   REQUEST_TIMEOUT_MS, waitForHealth,
 } from "./constants.js";
 import { resolveRepoForChannel } from "./repo-manager.js";
+import { writeSkillManifest } from "./skill-manifest.js";
 import {
   askQuestion, buildCodingContextPrefix, buildPlanningContextPrefix,
   type AskResult, type ProgressCallback,
@@ -204,6 +205,12 @@ export async function createCodingSession(
     } catch {
       // Non-fatal
     }
+  }
+
+  try {
+    writeSkillManifest(worktreeDir, { allowSkills: repoRow.allow_skills === 1 });
+  } catch (err) {
+    console.warn(`[coding] Skill manifest gen failed for ${worktreeDir}:`, err);
   }
 
   // Allocate port and write code-mode config
