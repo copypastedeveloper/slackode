@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Slackode — OAuth Authorization</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
+    .card { background: #fff; border-radius: 12px; padding: 2rem; max-width: 480px; width: 90%; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center; }
+    h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+    .code-box { background: #f0f0f0; border: 1px solid #ddd; border-radius: 6px; padding: 0.75rem 1rem; font-family: monospace; font-size: 1.1rem; word-break: break-all; user-select: all; margin: 1rem 0; }
+    .instruction { color: #555; font-size: 0.9rem; line-height: 1.5; }
+    .instruction code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.85rem; }
+    .copied { color: #2e7d32; font-weight: 600; }
+    .error { color: #c62828; }
+    button { background: #1264a3; color: #fff; border: none; border-radius: 6px; padding: 0.5rem 1.25rem; font-size: 0.9rem; cursor: pointer; margin-top: 0.5rem; }
+    button:hover { background: #0b4f8a; }
+  </style>
+</head>
+<body>
+  <div class="card" id="card">
+    <h1>Slackode OAuth</h1>
+    <div id="content"></div>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const state = params.get("state");
+    const error = params.get("error");
+    const el = document.getElementById("content");
+
+    if (error) {
+      el.innerHTML = '<p class="error">Authorization failed: ' + error + '</p><p class="instruction">Close this tab and try again in Slack.</p>';
+    } else if (code) {
+      var fullCommand = 'tool auth-code &lt;name&gt; ' + code + (state ? ' ' + state : '');
+      var copyText = code + (state ? ' ' + state : '');
+
+      el.innerHTML =
+        '<p class="instruction">Copy this and paste it in Slack:</p>' +
+        '<div class="code-box" id="code">' + copyText + '</div>' +
+        '<button id="copy">Copy to clipboard</button>' +
+        '<p id="status" class="instruction"></p>' +
+        '<p class="instruction" style="margin-top:1rem">In Slack, run:<br><code>' + fullCommand + '</code></p>';
+
+      document.getElementById("copy").addEventListener("click", function() {
+        navigator.clipboard.writeText(copyText).then(function() {
+          document.getElementById("status").innerHTML = '<span class="copied">Copied!</span>';
+        });
+      });
+    } else {
+      el.innerHTML = '<p class="error">No authorization code found in the URL.</p><p class="instruction">Close this tab and try again in Slack.</p>';
+    }
+  </script>
+</body>
+</html>

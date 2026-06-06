@@ -13,7 +13,8 @@ import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
 import { resumeCodingWithAgent, resumeCodingWithRepo, handleApprove, handleRevise, resumeCodingAfterPATConnect } from "./handlers/coding-handler.js";
 import { validateAndStoreGithubPAT } from "./handlers/github-commands.js";
-import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, GITHUB_CONNECT_MODAL_CALLBACK } from "./constants.js";
+import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, GITHUB_CONNECT_MODAL_CALLBACK, OAUTH_COMPLETE_MODAL_CALLBACK } from "./constants.js";
+import { completeOAuthExchange } from "./handlers/tool-commands.js";
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN;
@@ -209,6 +210,79 @@ app.view(GITHUB_CONNECT_MODAL_CALLBACK, async ({ ack, view, body, client }) => {
       errors: { pat_block: msg },
     });
   }
+});
+
+// OAuth Complete button → open modal
+app.action(Action.OAUTH_COMPLETE, async ({ action, ack, body, client }) => {
+  await ack();
+  const toolName = (action as { value: string }).value;
+  const triggerId = (body as { trigger_id?: string }).trigger_id;
+  if (!triggerId) return;
+
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  const threadTs = (body as { message?: { thread_ts?: string; ts?: string } }).message?.thread_ts
+    ?? (body as { message?: { ts?: string } }).message?.ts;
+
+  await client.views.open({
+    trigger_id: triggerId,
+    view: {
+      type: "modal",
+      callback_id: OAUTH_COMPLETE_MODAL_CALLBACK,
+      private_metadata: JSON.stringify({ toolName, channelId: channel, threadTs }),
+      title: { type: "plain_text", text: "Complete OAuth" },
+      submit: { type: "plain_text", text: "Authorize" },
+      close: { type: "plain_text", text: "Cancel" },
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `Complete OAuth authorization for *${toolName}*.\nPaste the code and state from the redirect page.`,
+          },
+        },
+        {
+          type: "input",
+          block_id: "code_block",
+          label: { type: "plain_text", text: "Authorization Code" },
+          element: {
+            type: "plain_text_input",
+            action_id: "code_input",
+            placeholder: { type: "plain_text", text: "Paste the authorization code" },
+          },
+        },
+        {
+          type: "input",
+          block_id: "state_block",
+          label: { type: "plain_text", text: "State" },
+          element: {
+            type: "plain_text_input",
+            action_id: "state_input",
+            placeholder: { type: "plain_text", text: "Paste the state value" },
+          },
+          optional: true,
+        },
+      ],
+    },
+  });
+});
+
+// OAuth Complete modal submission
+app.view(OAUTH_COMPLETE_MODAL_CALLBACK, async ({ ack, view, body, client }) => {
+  const code = view.state.values.code_block.code_input.value?.trim();
+  const oauthState = view.state.values.state_block.state_input.value?.trim();
+  const { toolName, channelId, threadTs } = JSON.parse(view.private_metadata);
+
+  if (!code) {
+    await ack({
+      response_action: "errors",
+      errors: { code_block: "Please enter the authorization code." },
+    });
+    return;
+  }
+
+  await ack();
+
+  await completeOAuthExchange(toolName, code, oauthState || undefined, client, channelId, threadTs);
 });
 
 /**

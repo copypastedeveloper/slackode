@@ -12,6 +12,7 @@ export const Action = {
   /** Prefix for repo selection buttons: select_repo_0, select_repo_1, etc. */
   SELECT_REPO_PREFIX: "select_repo_",
   GITHUB_CONNECT: "github_connect",
+  OAUTH_COMPLETE: "oauth_complete",
 } as const;
 
 /** Maximum number of agent selection buttons (Slack allows 5 elements per actions block). */
@@ -32,6 +33,7 @@ export const BlockPrefix = {
 } as const;
 
 export const GITHUB_CONNECT_MODAL_CALLBACK = "github_connect_modal";
+export const OAUTH_COMPLETE_MODAL_CALLBACK = "oauth_complete_modal";
 
 // ── Paths that should never be committed from coding worktrees ──
 
