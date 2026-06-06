@@ -1,0 +1,9 @@
+.local/
+node_modules/
+.git/
+dist/
+*.log
+.env
+.DS_Store
+sessions.db
+sessions.db-*
