@@ -5,25 +5,27 @@ set -e
 PROVIDER="${PROVIDER:-github-copilot}"
 MODEL="${MODEL:-claude-sonnet-4.6}"
 
-# ── Neutralize the target repo's own agent/skill/plugin files ──
-# Some repos ship their own .opencode/agents/, .opencode/plugin/,
-# and .claude/skills/ directories. OpenCode auto-discovers and loads these,
-# causing the agent to behave as a development assistant (editing files,
-# spawning subagents, loading skills). We must remove them after every
-# clone/pull so the agent stays read-only.
+# ── Neutralize the target repo's own agent/plugin/config files ──
+# Some repos ship .opencode/agents/, .opencode/plugin/, .claude/agents/, etc.
+# OpenCode auto-discovers these and they can override our read-only behavior or
+# inject hooks, so we strip them after every clone/pull.
+#
+# We deliberately PRESERVE skills (.claude/skills/, .opencode/skill[s]/) and
+# .claude/CLAUDE.md: skills are inert markdown surfaced to the agent via a
+# generated manifest (see writeSkillManifest in src/skill-manifest.ts). Keep this
+# in lockstep with cleanRepoAgents() in src/repo-manager.ts.
 clean_repo_agents() {
   local repo="$1"
-  echo "Cleaning repo agent/skill/plugin files..."
-  rm -rf "$repo/.opencode/agents"
-  rm -rf "$repo/.opencode/plugin"
-  rm -rf "$repo/.opencode/plugins"
-  rm -rf "$repo/.claude/skills"
-  rm -rf "$repo/.claude"
+  echo "Cleaning repo agent/plugin/config files (preserving skills)..."
+  rm -rf "$repo/.opencode/agents" "$repo/.opencode/agent"
+  rm -rf "$repo/.opencode/plugin" "$repo/.opencode/plugins"
+  rm -rf "$repo/.claude/agents" "$repo/.claude/commands" "$repo/.claude/hooks"
   rm -rf "$repo/.agents"
-  # Also remove any nested .opencode config that could override ours
+  # Remove nested .opencode config + claude settings that could override ours
   rm -f "$repo/.opencode/opencode.json"
   rm -f "$repo/.opencode/.opencode"
-  echo "Repo agent/skill/plugin files cleaned."
+  rm -f "$repo/.claude/settings.json" "$repo/.claude/settings.local.json"
+  echo "Repo agent/plugin/config files cleaned."
 }
 
 # ── Pre-seed OpenCode auth ──
@@ -78,8 +80,11 @@ if [ -z "$TARGET_REPO" ]; then
 fi
 export TARGET_REPO
 
-# GIT_TOKEN with fallback to legacy GITHUB_TOKEN
+# GIT_TOKEN with fallback to legacy GITHUB_TOKEN.
+# Unset GITHUB_TOKEN afterward so OpenCode does not auto-detect the
+# `github-models` provider — we route all LLM traffic through Bedrock.
 GIT_TOKEN="${GIT_TOKEN:-$GITHUB_TOKEN}"
+unset GITHUB_TOKEN
 
 if [ -n "$GIT_TOKEN" ]; then
   # Use GIT_ASKPASS to supply credentials without embedding them in the URL
@@ -99,13 +104,28 @@ if [ ! -d /app/repo/.git ]; then
   echo "Cloning ${TARGET_REPO}..."
   git clone "$REPO_URL" /app/repo
 else
-  # Ensure the remote URL doesn't contain embedded credentials from a prior run
+  # The checkout lives on persistent EFS. Two things rot it over time:
+  #  1) Stale *.lock files under .git/refs (and index.lock) left by git processes
+  #     killed mid-op — these block every pull ("Another git process is running"),
+  #     freezing the repo on an old commit. Clear ONLY those — never gc.log.lock or
+  #     objects/maintenance.lock, deleting which triggers a full repack that hangs boot.
+  #  2) Files deleted from the working tree by a prior image version (e.g. skills) —
+  #     a plain `git pull` won't restore them.
+  # So: clear the blocking locks, fetch, then hard-reset to the remote default branch
+  # to force the checkout to match origin exactly (restores skills, advances commit).
+  find /app/repo/.git/refs -name '*.lock' -type f -delete 2>/dev/null || true
+  rm -f /app/repo/.git/index.lock 2>/dev/null || true
+
   git -C /app/repo remote set-url origin "$REPO_URL"
   echo "Updating ${TARGET_REPO}..."
-  git -C /app/repo pull || echo "Pull failed, continuing with existing checkout."
+  if git -C /app/repo fetch origin 2>&1; then
+    git -C /app/repo reset --hard '@{u}' || echo "Reset failed, continuing with existing checkout."
+  else
+    echo "Fetch failed, continuing with existing checkout."
+  fi
 fi
 
-# ── Neutralize repo's own agents/skills/plugins ──
+# ── Neutralize repo's own agents/plugins (skills preserved) ──
 clean_repo_agents /app/repo
 
 # ── Copy OpenCode rules and plugin into the repo directory ──

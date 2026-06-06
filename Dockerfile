@@ -19,7 +19,13 @@ RUN apt-get update && apt-get install -y curl git python3 python3-pip python3-ve
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
        > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
-RUN npm install -g opencode-ai
+# Pin opencode-ai to a version whose server streams SSE correctly to the Node SDK.
+# IMPORTANT: keep this in lockstep with @opencode-ai/sdk in package.json.
+# 1.14.23–1.14.51 shipped a server-proxy that closes the SSE stream after the first
+# event under Node's undici fetch (curl is unaffected), causing 100% empty answers.
+# Fixed by 1.15.x. Bump deliberately: test with `OPENCODE_PIN=<ver> npm run dev:local`
+# before changing this.
+RUN npm install -g opencode-ai@1.15.13
 
 # Create non-root user
 RUN useradd -m -s /bin/bash appuser
