@@ -252,13 +252,55 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   let compacted = false;
   let skipNextStop = false;  // After compaction, skip the auto-continue's garbage stop
   let assistantMessageId: string | undefined;
+  let userMessageId: string | undefined;  // captured from message.updated role=user; used to reject the echoed prompt
 
+  // Diagnostic counters — only emitted when we hit the empty-answer branch so we can tell what the stream actually did.
+  const streamStartMs = Date.now();
+  const diag = {
+    partCounts: {} as Record<string, number>,
+    stepStarts: 0,
+    stepFinishReasons: [] as string[],
+    toolsRunning: 0,
+    toolsCompleted: 0,
+    toolsErrored: 0,
+    compactions: 0,
+    textPartsAcceptedForActiveMessage: 0,
+    textPartsRejectedNoActiveMessage: 0,
+    textPartsRejectedMessageIdMismatch: 0,
+    sessionIdleReceived: false,
+    timeoutFired: false,
+    terminateReason: "" as "" | "timeout" | "idle",
+    abortReceived: false,
+  };
+  const bumpPart = (t: string): void => { diag.partCounts[t] = (diag.partCounts[t] ?? 0) + 1; };
+
+  // Hard ceiling on the whole exchange.
   const TIMEOUT_MS = 10 * 60 * 1000;
-  const timeout = setTimeout(() => { done = true; }, TIMEOUT_MS);
+  // Idle watchdog: if opencode goes silent (no SSE events at all) for this long, give up.
+  // This is the real guard against a hung server — a true hang produces zero events, so the
+  // `for await` blocks indefinitely on stream.next() and never re-checks `done`. We must
+  // actively terminate the stream (stream.return) to unblock it.
+  const IDLE_MS = 90 * 1000;
+
+  const terminate = (reason: "timeout" | "idle"): void => {
+    done = true;
+    diag.timeoutFired = true;
+    diag.terminateReason = reason;
+    // Force the suspended `for await` to complete even when no events are arriving.
+    try { void stream.return(undefined); } catch { /* already closed */ }
+  };
+
+  const timeout = setTimeout(() => terminate("timeout"), TIMEOUT_MS);
+  let idleTimer: ReturnType<typeof setTimeout> = setTimeout(() => terminate("idle"), IDLE_MS);
+  const resetIdle = (): void => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => terminate("idle"), IDLE_MS);
+  };
   let postAnswerTimeout: ReturnType<typeof setTimeout> | undefined;
 
   try {
     for await (const event of stream) {
+      resetIdle();
       if (done) break;
       if (abortSignal?.aborted) {
         console.log(`[opencode] Session ${sessionId} aborted — exiting SSE loop.`);
@@ -267,13 +309,20 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
 
       const evt = event as Event;
 
-      if (evt.type === "message.part.updated") {
+      if (evt.type === "message.updated") {
+        const info = (evt.properties as { info?: { sessionID?: string; role?: string; id?: string } }).info;
+        if (info?.sessionID !== sessionId) continue;
+        if (info.role === "user" && info.id) userMessageId = info.id;
+        else if (info.role === "assistant" && info.id) assistantMessageId = info.id;
+      } else if (evt.type === "message.part.updated") {
         const { part } = evt.properties;
         if (part.sessionID !== sessionId) continue;
+        bumpPart(part.type);
 
         if (answerCaptured) {
           if (part.type === "compaction") {
             compacted = true;
+            diag.compactions++;
             done = true;
             break;
           }
@@ -282,14 +331,29 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
 
         if (part.type === "step-start") {
           assistantMessageId = (part as { messageID?: string }).messageID;
+          diag.stepStarts++;
         } else if (part.type === "text") {
-          if (!assistantMessageId) continue;
-          if ((part as { messageID?: string }).messageID !== assistantMessageId) continue;
+          // Reject only the user's echoed prompt (learned from message.updated role=user,
+          // or as a fallback the first text part before any role has been seen).
+          const partMessageId = (part as { messageID?: string }).messageID;
+          if (!userMessageId) {
+            userMessageId = partMessageId;
+            diag.textPartsRejectedNoActiveMessage++;
+            continue;
+          }
+          if (partMessageId === userMessageId) {
+            diag.textPartsRejectedNoActiveMessage++;
+            continue;
+          }
+          // Anything else is assistant text. Accept whether or not a step-start preceded it.
+          diag.textPartsAcceptedForActiveMessage++;
+          if (!assistantMessageId) assistantMessageId = partMessageId;
           latestText = part.text ?? "";
           if (onProgress && latestText) onProgress(latestText);
         } else if (part.type === "tool") {
           const stateType = getToolStateType(part);
           if (stateType === "running") {
+            diag.toolsRunning++;
             activeTools.set(part.callID, part.tool);
             if (onProgress) {
               const toolNames = [...activeTools.values()].join(", ");
@@ -298,17 +362,21 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
                 : `_Using: ${toolNames}..._`);
             }
           } else if (stateType === "completed" || stateType === "error") {
+            if (stateType === "completed") diag.toolsCompleted++;
+            else diag.toolsErrored++;
             activeTools.delete(part.callID);
           }
         } else if (part.type === "compaction") {
           console.log(`[opencode] Compaction event for session ${sessionId}`);
           compacted = true;
+          diag.compactions++;
           skipNextStop = true;  // The auto-continue after compaction produces a garbage summary; skip it
           assistantMessageId = undefined;
           latestText = "";
           activeTools.clear();
         } else if (part.type === "step-finish") {
           const reason = (part as { reason?: string }).reason;
+          diag.stepFinishReasons.push(reason ?? "(none)");
           if (reason === "stop") {
             if (skipNextStop) {
               // This is the auto-continue's compaction summary — discard it and keep listening
@@ -332,6 +400,7 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
         }
       } else if (evt.type === "session.idle") {
         if (evt.properties.sessionID === sessionId) {
+          diag.sessionIdleReceived = true;
           done = true;
           break;
         }
@@ -339,16 +408,38 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
     }
   } finally {
     clearTimeout(timeout);
+    clearTimeout(idleTimer);
     if (postAnswerTimeout) clearTimeout(postAnswerTimeout);
     stream.return(undefined);
   }
 
   if (abortSignal?.aborted) {
+    diag.abortReceived = true;
     throw new Error("Session aborted");
   }
 
+  // If we bailed on the watchdog with no text, the model never responded (hung server,
+  // stuck MCP, etc.). Surface a clear, retryable message instead of a silent non-answer.
+  if (!latestText && diag.terminateReason) {
+    console.warn("[opencode] aborted on watchdog", JSON.stringify({ sessionId, reason: diag.terminateReason, durationMs: Date.now() - streamStartMs, ...diag }));
+    return {
+      text: "Sorry — that took too long and I had to give up (the assistant backend stopped responding). Please try again.",
+      isQuestion: false,
+      compacted: false,
+    };
+  }
+
   if (!latestText) {
-    console.warn("OpenCode returned empty answer via streaming for session:", sessionId);
+    const durationMs = Date.now() - streamStartMs;
+    console.warn("[opencode] empty answer", JSON.stringify({
+      sessionId,
+      durationMs,
+      lastAssistantMessageId: assistantMessageId ?? null,
+      answerCaptured,
+      skipNextStop,
+      compacted,
+      ...diag,
+    }));
     return { text: "I wasn't able to generate a response. Please try again.", isQuestion: false, compacted: false };
   }
 
