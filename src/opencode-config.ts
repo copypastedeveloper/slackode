@@ -32,6 +32,20 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
   // files in prod). Turning it off removes that whole failure mode.
   config.snapshot = false;
 
+  // Enable opencode's NATIVE skill support. Per the opencode docs, it scans
+  // .claude/skills/<name>/SKILL.md (among others) from cwd up to the git root and skills are
+  // enabled by default — but the base config disables them (`skill: false` + permission deny)
+  // as part of the read-only lockdown. We re-enable just `skill` so the agent natively loads
+  // the repo's skills (write/edit/task stay denied → still read-only). The `build` Q&A agent
+  // enables it here so all generated build-* variants inherit it.
+  config.tools = config.tools || {};
+  config.tools.skill = true;
+  if (config.permission) config.permission.skill = { "*": "allow" };
+  if (config.agent?.build) {
+    config.agent.build.tools = { ...config.agent.build.tools, skill: true };
+    if (config.agent.build.permission) config.agent.build.permission.skill = { "*": "allow" };
+  }
+
   const tools = getEnabledTools();
   const enabled: string[] = [];
 
