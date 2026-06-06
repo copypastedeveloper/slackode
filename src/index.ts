@@ -9,6 +9,7 @@ import {
   startSessionReaper, destroyAllCodingSessions, cleanupOrphanedSessions,
 } from "./coding-session.js";
 import { startPeriodicTokenRefresh, stopPeriodicTokenRefresh } from "./mcp/oauth-refresh.js";
+import { startPeriodicGDocsSync, stopPeriodicGDocsSync } from "./gdocs-sync.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
@@ -320,6 +321,11 @@ async function start(): Promise<void> {
   // 3b. Start periodic OAuth token refresh
   startPeriodicTokenRefresh();
 
+  // 3c. Start periodic Google Docs sync (if service account configured)
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    startPeriodicGDocsSync();
+  }
+
   // 4. Initialize OpenCode SDK client
   initOpencode(OPENCODE_URL);
 
@@ -355,6 +361,7 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[shutdown] start (signal=${signal})`);
   try { stopPeriodicTokenRefresh(); } catch (e) { console.warn("[shutdown] stopPeriodicTokenRefresh:", e); }
+  try { stopPeriodicGDocsSync(); } catch (e) { console.warn("[shutdown] stopPeriodicGDocsSync:", e); }
   try { await destroyAllCodingSessions(); } catch (e) { console.warn("[shutdown] destroyAllCodingSessions:", e); }
   console.log("[shutdown] stopping opencode server");
   try { await stopServer(); } catch (e) { console.warn("[shutdown] stopServer:", e); }

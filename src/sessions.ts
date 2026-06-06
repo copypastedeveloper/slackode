@@ -201,6 +201,15 @@ function getDb(): Database.Database {
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_scope_title ON knowledge(scope, scope_key, title)
     `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS knowledge_sources (
+        google_file_id TEXT PRIMARY KEY,
+        knowledge_id INTEGER NOT NULL REFERENCES knowledge(id) ON DELETE CASCADE,
+        file_name TEXT NOT NULL,
+        modified_time TEXT NOT NULL,
+        last_synced_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
   }
   return db;
 }
@@ -1211,6 +1220,64 @@ export function listKnowledge(
   return getDb()
     .prepare("SELECT * FROM knowledge ORDER BY scope, title")
     .all() as KnowledgeRow[];
+}
+
+// ── Google Docs sync sources ──
+
+export interface KnowledgeSourceRow {
+  google_file_id: string;
+  knowledge_id: number;
+  file_name: string;
+  modified_time: string;
+  last_synced_at: number;
+}
+
+export function upsertKnowledgeSource(
+  googleFileId: string,
+  knowledgeId: number,
+  fileName: string,
+  modifiedTime: string,
+): void {
+  getDb()
+    .prepare(`
+      INSERT INTO knowledge_sources (google_file_id, knowledge_id, file_name, modified_time, last_synced_at)
+      VALUES (?, ?, ?, ?, unixepoch())
+      ON CONFLICT(google_file_id) DO UPDATE SET
+        knowledge_id = excluded.knowledge_id,
+        file_name = excluded.file_name,
+        modified_time = excluded.modified_time,
+        last_synced_at = unixepoch()
+    `)
+    .run(googleFileId, knowledgeId, fileName, modifiedTime);
+}
+
+export function getKnowledgeSource(googleFileId: string): KnowledgeSourceRow | undefined {
+  return getDb()
+    .prepare("SELECT * FROM knowledge_sources WHERE google_file_id = ?")
+    .get(googleFileId) as KnowledgeSourceRow | undefined;
+}
+
+export function getAllKnowledgeSources(): KnowledgeSourceRow[] {
+  return getDb()
+    .prepare("SELECT * FROM knowledge_sources ORDER BY file_name")
+    .all() as KnowledgeSourceRow[];
+}
+
+export function removeKnowledgeSource(googleFileId: string): boolean {
+  const database = getDb();
+  const txn = database.transaction(() => {
+    const source = database
+      .prepare("SELECT knowledge_id FROM knowledge_sources WHERE google_file_id = ?")
+      .get(googleFileId) as { knowledge_id: number } | undefined;
+    const result = database
+      .prepare("DELETE FROM knowledge_sources WHERE google_file_id = ?")
+      .run(googleFileId);
+    if (source) {
+      database.prepare("DELETE FROM knowledge WHERE id = ?").run(source.knowledge_id);
+    }
+    return result.changes > 0;
+  });
+  return txn();
 }
 
 export function getKnowledgeContent(

@@ -6,6 +6,8 @@
  *   knowledge update <title-or-id>: <new content>                        → admin only
  *   knowledge remove <title-or-id>                                       → admin only
  *   knowledge import [--global|--channel|--repo <name>]                  → admin only (with attached .md file)
+ *   knowledge sources                                                   → list synced Google Docs (open to all)
+ *   knowledge sync                                                      → trigger manual Google Docs sync (admin only)
  */
 import {
   addKnowledge,
@@ -16,8 +18,10 @@ import {
   listKnowledge,
   getChannelRepo,
   getDefaultRepo,
+  getAllKnowledgeSources,
   type KnowledgeRow,
 } from "../sessions.js";
+import { syncGoogleDocs, getServiceAccountEmail } from "../gdocs-sync.js";
 
 function formatEntry(k: KnowledgeRow): string {
   const scope = k.scope_key ? `${k.scope}:${k.scope_key}` : k.scope;
@@ -73,12 +77,12 @@ export interface KnowledgeImportFile {
   content: string;
 }
 
-export function handleKnowledgeCommand(
+export async function handleKnowledgeCommand(
   command: string,
   channelId: string,
   userId: string,
   importFiles?: KnowledgeImportFile[],
-): string | null {
+): Promise<string | null> {
   // knowledge list [--global|--repo|--channel]
   const listMatch = command.match(/^knowledge\s+list(?:\s+(--\S+(?:\s+\S+)?))?$/i);
   if (listMatch) {
@@ -158,6 +162,48 @@ export function handleKnowledgeCommand(
     if (!entry) return `Knowledge entry "${removeMatch[1].trim()}" not found.`;
     removeKnowledge(entry.id);
     return `Knowledge \`#${entry.id}\` (*${entry.title}*) removed.`;
+  }
+
+  // knowledge sources — list synced Google Docs
+  if (/^knowledge\s+sources$/i.test(command)) {
+    const sources = getAllKnowledgeSources();
+    if (sources.length === 0) {
+      let msg = "No Google Docs synced yet.";
+      if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+        try {
+          const email = await getServiceAccountEmail();
+          msg += `\nShare Google Docs with \`${email}\` and they'll sync automatically.`;
+        } catch { /* auth not configured */ }
+      } else {
+        msg += "\nSet `GOOGLE_APPLICATION_CREDENTIALS` to enable Google Docs sync.";
+      }
+      return msg;
+    }
+    const lines = sources.map((s) => {
+      const synced = new Date(s.last_synced_at * 1000).toLocaleDateString();
+      const docUrl = `https://docs.google.com/document/d/${s.google_file_id}`;
+      return `• <${docUrl}|${s.file_name}> (synced ${synced}, knowledge \`#${s.knowledge_id}\`)`;
+    });
+    return `*Synced Google Docs (${sources.length}):*\n${lines.join("\n")}`;
+  }
+
+  // knowledge sync — trigger manual Google Docs sync (admin only)
+  if (/^knowledge\s+sync$/i.test(command)) {
+    if (!process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      return "Google Docs sync is not configured. Set `GOOGLE_APPLICATION_CREDENTIALS` to enable it.";
+    }
+    const result = await syncGoogleDocs();
+    const parts: string[] = [];
+    if (result.added) parts.push(`${result.added} added`);
+    if (result.updated) parts.push(`${result.updated} updated`);
+    if (result.removed) parts.push(`${result.removed} removed`);
+    let msg = parts.length > 0
+      ? `Sync complete: ${parts.join(", ")}.`
+      : "Sync complete — no changes.";
+    if (result.errors.length > 0) {
+      msg += `\n\n*Errors (${result.errors.length}):*\n${result.errors.map((e) => `• ${e}`).join("\n")}`;
+    }
+    return msg;
   }
 
   // knowledge import [--global|--channel|--repo <name>]

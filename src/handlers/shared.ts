@@ -97,7 +97,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
         filename: f.filename,
         content: Buffer.from(f.dataUri.split(",")[1], "base64").toString("utf-8"),
       }));
-    const reply = handleKnowledgeCommand(question, channelId, userId, mdFiles);
+    const reply = await handleKnowledgeCommand(question, channelId, userId, mdFiles);
     await client.chat.postMessage({
       channel: channelId, thread_ts: threadTs,
       text: reply || "No `.md` files found in the attachments.",
@@ -188,11 +188,11 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
 
     // ── Knowledge commands (admin-only for mutations, open for list/view) ──
     if (/^knowledge\s+/i.test(question)) {
-      if (!/^knowledge\s+(list|view)\b/i.test(question) && !hasRole(userId, "admin")) {
+      if (!/^knowledge\s+(list|view|sources)\b/i.test(question) && !hasRole(userId, "admin")) {
         await denyAccess(client, channelId, userId, threadTs, "admin");
         return;
       }
-      const knowledgeReply = handleKnowledgeCommand(question, channelId, userId);
+      const knowledgeReply = await handleKnowledgeCommand(question, channelId, userId);
       if (knowledgeReply) {
         await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: knowledgeReply });
         return;
