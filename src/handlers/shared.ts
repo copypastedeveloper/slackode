@@ -128,7 +128,10 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
 
     // ── Admin-only: tool add conversation flow ──
     if (hasRole(userId, "admin")) {
-      const addReply = advanceToolAdd(channelId, userId, question);
+      const addReply = await advanceToolAdd(channelId, userId, question, client, threadTs);
+      if (addReply === "__handled__") {
+        return; // Already posted (e.g. OAuth button)
+      }
       if (addReply) {
         await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: addReply });
         return;

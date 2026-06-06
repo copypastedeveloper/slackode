@@ -215,7 +215,7 @@ export async function createCodingSession(
 
   // Allocate port and write code-mode config
   const port = allocatePort();
-  writeOpencodeConfig(worktreeDir, "code");
+  await writeOpencodeConfig(worktreeDir, "code");
 
   // Save to DB before starting server
   saveCodingSession({

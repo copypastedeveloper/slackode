@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { getEnabledTools, getToolKey } from "./sessions.js";
+import { getEnabledTools, getToolKey, getOAuthAccessToken } from "./sessions.js";
+import { ensureFreshToken } from "./mcp/oauth-refresh.js";
 
 /** Path to the pristine base config (without MCP injections). */
 const BASE_CONFIG_PATH = process.env.BASE_CONFIG_PATH ?? "/app/opencode.json";
@@ -16,7 +17,7 @@ export type ConfigMode = "qa" | "code";
  *
  * Always starts from the base config so restarts don't accumulate entries.
  */
-export function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): void {
+export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): Promise<void> {
   const config = JSON.parse(readFileSync(BASE_CONFIG_PATH, "utf-8"));
 
   // Apply provider/model from env (same as the sed in entrypoint.sh)
@@ -24,16 +25,33 @@ export function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): v
   const model = process.env.MODEL ?? "claude-sonnet-4.6";
   config.model = `${provider}/${model}`;
 
+  // Disable opencode's git snapshot feature. Snapshots track file edits, but this is a
+  // read-only Q&A/agent that never edits the repo — so they're pure overhead. Worse, the
+  // snapshot git ops race slackode's background repo-sync (git pull) in the same checkout,
+  // and intermittently hang the session at "snapshot initialized" (left stale index.lock
+  // files in prod). Turning it off removes that whole failure mode.
+  config.snapshot = false;
+
   const tools = getEnabledTools();
   const enabled: string[] = [];
 
   for (const tool of tools) {
-    const key = getToolKey(tool);
+    let key: string | undefined;
 
-    // Remote tools require an API key — skip if missing.
-    if (tool.mcp_type === "remote" && !key) {
-      console.log(`[config] ${tool.name} skipped (no API key set).`);
-      continue;
+    if (tool.auth_type === "oauth") {
+      // For OAuth tools, try to get a fresh access token
+      key = await ensureFreshToken(tool.name, tool.mcp_url ?? "");
+      if (!key) {
+        console.log(`[config] ${tool.name} skipped (OAuth not authorized yet).`);
+        continue;
+      }
+    } else {
+      key = getToolKey(tool);
+      // Remote tools with api_key auth require a key — skip if missing.
+      if (tool.mcp_type === "remote" && !key) {
+        console.log(`[config] ${tool.name} skipped (no API key set).`);
+        continue;
+      }
     }
 
     enabled.push(tool.name);
@@ -64,7 +82,7 @@ export function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "qa"): v
       config.mcp[tool.name] = entry;
     }
 
-    console.log(`[config] ${tool.name} configured (${tool.mcp_type}).`);
+    console.log(`[config] ${tool.name} configured (${tool.mcp_type}, auth: ${tool.auth_type}).`);
 
     // Disable this tool's MCP tools globally (agents opt in via variants)
     config.tools[`${tool.name}*`] = false;

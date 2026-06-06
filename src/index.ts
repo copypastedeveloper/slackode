@@ -8,6 +8,7 @@ import { initRepos, generateContextForAllRepos } from "./repo-manager.js";
 import {
   startSessionReaper, destroyAllCodingSessions, cleanupOrphanedSessions,
 } from "./coding-session.js";
+import { startPeriodicTokenRefresh, stopPeriodicTokenRefresh } from "./mcp/oauth-refresh.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
@@ -311,10 +312,13 @@ async function start(): Promise<void> {
 
   // 2. Generate opencode.json from DB-backed tool config
   setRepoDir(REPO_DIR);
-  writeOpencodeConfig(REPO_DIR);
+  await writeOpencodeConfig(REPO_DIR);
 
   // 3. Start OpenCode server and wait for health
   await startServer();
+
+  // 3b. Start periodic OAuth token refresh
+  startPeriodicTokenRefresh();
 
   // 4. Initialize OpenCode SDK client
   initOpencode(OPENCODE_URL);
@@ -342,16 +346,25 @@ async function start(): Promise<void> {
 }
 
 // Graceful shutdown
-async function shutdown(): Promise<void> {
-  console.log("Shutting down...");
-  await destroyAllCodingSessions();
-  await stopServer();
-  closeDb();
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) {
+    console.log(`[shutdown] ${signal} ignored — already shutting down`);
+    return;
+  }
+  shuttingDown = true;
+  console.log(`[shutdown] start (signal=${signal})`);
+  try { stopPeriodicTokenRefresh(); } catch (e) { console.warn("[shutdown] stopPeriodicTokenRefresh:", e); }
+  try { await destroyAllCodingSessions(); } catch (e) { console.warn("[shutdown] destroyAllCodingSessions:", e); }
+  console.log("[shutdown] stopping opencode server");
+  try { await stopServer(); } catch (e) { console.warn("[shutdown] stopServer:", e); }
+  try { closeDb(); } catch (e) { console.warn("[shutdown] closeDb:", e); }
+  console.log("[shutdown] done — exiting");
   process.exit(0);
 }
 
-process.on("SIGINT", () => { shutdown(); });
-process.on("SIGTERM", () => { shutdown(); });
+process.on("SIGINT", () => { shutdown("SIGINT"); });
+process.on("SIGTERM", () => { shutdown("SIGTERM"); });
 
 start().catch((error) => {
   console.error("Failed to start:", error);

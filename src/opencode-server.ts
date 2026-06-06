@@ -8,6 +8,7 @@ const HEALTH_URL = `http://${HOSTNAME}:${PORT}/global/health`;
 
 let serverProcess: ChildProcess | null = null;
 let restarting = false;
+let stopping = false;
 let restartResolvers: Array<() => void> = [];
 let repoDir: string;
 
@@ -59,8 +60,8 @@ export async function startServer(): Promise<void> {
     console.log(`[server] OpenCode exited (code=${code}, signal=${signal})`);
     serverProcess = null;
 
-    // Auto-restart if the server crashed outside of a managed restart/stop.
-    if (!restarting) {
+    // Auto-restart only when this exit was unexpected — not a managed restart or shutdown.
+    if (!restarting && !stopping) {
       console.warn("[server] Unexpected exit — restarting automatically...");
       startServer().catch((err) => {
         console.error("[server] Auto-restart failed:", err);
@@ -78,6 +79,7 @@ export async function stopServer(): Promise<void> {
   if (!serverProcess) return;
 
   console.log("[server] Stopping OpenCode server...");
+  stopping = true;
   const proc = serverProcess;
   serverProcess = null;
 
@@ -124,7 +126,7 @@ export async function restartServer(): Promise<number> {
   const start = Date.now();
   restarting = true;
   try {
-    writeOpencodeConfig(repoDir);
+    await writeOpencodeConfig(repoDir);
     await stopServer();
     await startServer();
     return (Date.now() - start) / 1000;
