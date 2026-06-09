@@ -103,6 +103,19 @@ const FAMILIES: Family[] = [
     ],
   },
   {
+    key: "stats",
+    title: "Stats",
+    visibleTo: "anyone",
+    blurb: "Usage analytics — who's asking, where, and how it's going.",
+    lines: [
+      "• `stats` — last 24h overview: turns, users, channels, outcomes, latency",
+      "• `stats --week` / `stats --month` — wider window",
+      "• `stats --user @user` — that user's volume + channels",
+      "• `stats --channel #channel` — that channel's volume + top users",
+      "• `stats --quality` — outcome breakdown + latency/step percentiles",
+    ],
+  },
+  {
     key: "memory",
     title: "Memory",
     visibleTo: "anyone",

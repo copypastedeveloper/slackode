@@ -27,6 +27,7 @@ import { handleCodingMessage, handleCodeStart } from "./coding-handler.js";
 import { handleMemoryCommand } from "./memory-commands.js";
 import { handleKnowledgeCommand, type KnowledgeImportFile } from "./knowledge-commands.js";
 import { handleHelpCommand } from "./help-commands.js";
+import { handleStatsCommand } from "./stats-commands.js";
 
 /** Send an ephemeral denial message visible only to the requesting user. */
 async function denyAccess(
@@ -110,6 +111,13 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     const helpReply = handleHelpCommand(question, userId);
     if (helpReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: helpReply });
+      return;
+    }
+
+    // ── Stats (open to all, read-only) ──
+    const statsReply = handleStatsCommand(question);
+    if (statsReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: statsReply });
       return;
     }
 
