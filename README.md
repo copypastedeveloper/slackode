@@ -323,7 +323,7 @@ Query from Slack with `stats`:
 @Slackode stats --all                 # whole workspace
 @Slackode stats --week                # / --month — wider window
 @Slackode stats --user @nathan        # that user (still scoped to current channel)
-@Slackode stats --channel #core-qa    # a specific channel
+@Slackode stats --channel #engineering # a specific channel
 @Slackode stats --quality             # outcome breakdown + p50/p95 latency, steps, tokens, cost
 ```
 
@@ -483,7 +483,7 @@ npm run dev:local
 What the script does:
 - Loads `.env` and resolves `REPO_DIR`, `REPOS_BASE_DIR`, `SESSIONS_DB_PATH`, `BASE_CONFIG_PATH`, `TOOLS_SEED_PATH` to paths under `.local/`.
 - Clones `REPO_URL` into `.local/repo` on first run.
-- Pins opencode to `1.15.13` by default (matches prod). Override with `OPENCODE_PIN=<ver>` to reproduce a different version's behavior. The pinned binary lives at `.local/bin/opencode-<ver>`.
+- Pins opencode to the version baked into the Dockerfile (the system install) by default. Override with `OPENCODE_PIN=<ver>` to reproduce a specific version's behavior — place the binary at `.local/bin/opencode-<ver>` and dev.sh will symlink it.
 - When `PROVIDER=amazon-bedrock`, resolves AWS credentials from your active CLI session via `aws configure export-credentials --format env` and exports them — no need to paste keys into `.env`.
 - Execs `tsx src/index.ts` directly (not via `npm`) so `SIGINT` propagates cleanly and the shutdown handler can fully run.
 

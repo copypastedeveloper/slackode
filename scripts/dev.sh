@@ -47,9 +47,9 @@ if [ ! -d "$REPO_DIR/.git" ]; then
   git clone "$REPO_URL" "$REPO_DIR"
 fi
 
-# Pin opencode to match prod by default (1.15.13). Override with OPENCODE_PIN=<ver>
-# when you need to reproduce a bug against a different version. Falls back to the
-# system opencode only if no pinned binary is parked at .local/bin/opencode-<ver>.
+# Pin opencode to a specific version when a binary is parked at
+# .local/bin/opencode-<ver>. Override with OPENCODE_PIN=<ver>; falls back to the
+# system opencode (whatever is on PATH) when no pinned binary is found.
 DEFAULT_OPENCODE_PIN="1.15.13"
 PIN="${OPENCODE_PIN:-$DEFAULT_OPENCODE_PIN}"
 if [ -x "$ROOT/.local/bin/opencode-$PIN" ]; then
