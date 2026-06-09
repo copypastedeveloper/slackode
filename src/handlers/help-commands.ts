@@ -28,6 +28,7 @@ const FAMILIES: Family[] = [
       "• `config set prompt <text>` / `config get prompt` / `config clear prompt`",
       "• `config set repo <name>` / `config get repo` / `config clear repo`",
       "• `config available agents|tools|repos` — list what can be selected",
+      "• `config list channels` — unified view of every channel's overrides",
     ],
   },
   {

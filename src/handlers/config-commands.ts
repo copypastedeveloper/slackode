@@ -1,7 +1,7 @@
 import {
   getChannelAgent, setChannelAgent, clearChannelAgent, listChannelAgents,
   getChannelTools, setChannelTools, clearChannelTools, listChannelTools,
-  getChannelConfig, setChannelConfig, clearChannelConfig,
+  getChannelConfig, setChannelConfig, clearChannelConfig, listChannelConfigs,
   getChannelRepo, setChannelRepo, clearChannelRepo, listChannelRepos,
   getRepo, getDefaultRepo, getAllRepos,
 } from "../sessions.js";
@@ -199,6 +199,49 @@ export async function handleConfigCommand(
     return `*Channel repo mappings:*\n${lines.join("\n")}`;
   }
 
+  // config list channels — unified view of every channel with any custom config.
+  // Joins agent / tools / repo / prompt by channel_id; channels with no overrides at all
+  // are not listed (they're implicitly using defaults).
+  if (/^list\s+channels?$/i.test(subcommand)) {
+    type ChannelSummary = {
+      name: string;
+      agent?: string;
+      tools?: string;
+      repo?: string;
+      prompt?: string;
+      promptBy?: string;
+    };
+    const byId = new Map<string, ChannelSummary>();
+    const upsert = (id: string, name: string, patch: Partial<ChannelSummary>): void => {
+      const existing = byId.get(id) ?? { name };
+      if (name) existing.name = name;
+      Object.assign(existing, patch);
+      byId.set(id, existing);
+    };
+    for (const r of listChannelAgents()) upsert(r.channel_id, r.channel_name, { agent: r.agent });
+    for (const r of listChannelTools()) upsert(r.channel_id, r.channel_name, { tools: r.tools });
+    for (const r of listChannelRepos()) upsert(r.channel_id, r.channel_name, { repo: r.repo_name });
+    for (const r of listChannelConfigs()) upsert(r.channel_id, "", { prompt: r.custom_prompt, promptBy: r.configured_by });
+
+    if (byId.size === 0) {
+      return "No channels have custom configuration. Every channel is using defaults.";
+    }
+    const truncate = (s: string, n: number): string => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
+    const sorted = [...byId.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name));
+    const blocks = sorted.map(([id, c]) => {
+      const lines = [`*#${c.name || id}*`];
+      if (c.agent) lines.push(`  agent: \`${c.agent}\``);
+      if (c.tools) lines.push(`  tools: ${c.tools.split(",").map((t) => `\`${t}\``).join(", ")}`);
+      if (c.repo) lines.push(`  repo: \`${c.repo}\``);
+      if (c.prompt) {
+        const by = c.promptBy ? ` _(set by <@${c.promptBy}>)_` : "";
+        lines.push(`  prompt: ${truncate(c.prompt, 120)}${by}`);
+      }
+      return lines.join("\n");
+    });
+    return `*Channel configs (${byId.size}):*\n${blocks.join("\n\n")}`;
+  }
+
   // config available repos
   if (/^available\s+repos?$/i.test(subcommand)) {
     const repos = getAllRepos();
@@ -231,5 +274,6 @@ export async function handleConfigCommand(
     "• `config clear repo`",
     "• `config list repos`",
     "• `config available repos`",
+    "• `config list channels` — unified per-channel view (agent + tools + repo + prompt)",
   ].join("\n");
 }
