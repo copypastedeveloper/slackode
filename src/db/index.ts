@@ -227,13 +227,24 @@ export function getDb(): Database.Database {
         step_count INTEGER,
         outcome TEXT NOT NULL,
         outcome_detail TEXT,
-        compacted INTEGER NOT NULL DEFAULT 0
+        compacted INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        reasoning_tokens INTEGER,
+        cache_read_tokens INTEGER,
+        cache_write_tokens INTEGER,
+        cost_usd REAL
       )
     `);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_turns_ts ON turns(ts)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_turns_user_ts ON turns(user_id, ts)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_turns_channel_ts ON turns(channel_id, ts)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_turns_outcome_ts ON turns(outcome, ts)`);
+    // Migrations for existing turn rows that pre-date token tracking.
+    for (const col of ["input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens"]) {
+      try { db.exec(`ALTER TABLE turns ADD COLUMN ${col} INTEGER`); } catch { /* exists */ }
+    }
+    try { db.exec(`ALTER TABLE turns ADD COLUMN cost_usd REAL`); } catch { /* exists */ }
   }
   return db;
 }

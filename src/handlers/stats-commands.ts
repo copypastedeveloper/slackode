@@ -1,4 +1,8 @@
+import prettyMs from "pretty-ms";
 import { getStatsSummary, type StatsSummary } from "../db/turns.js";
+
+/** Compact number formatter — 1234 → "1.2K", 1234567 → "1.2M". Native; no deps. */
+const compactNum = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 
 /**
  * Handle `stats` Slack commands.
@@ -69,21 +73,23 @@ function renderOverview(s: StatsSummary, windowLabel: string): string {
   if (s.totalTurns === 0) return `*Stats (${windowLabel})*\nNo activity yet.`;
   const lines = [
     `*Stats (${windowLabel})*`,
-    `• ${s.totalTurns} turn${s.totalTurns === 1 ? "" : "s"} from ${s.uniqueUsers} user${s.uniqueUsers === 1 ? "" : "s"} across ${s.uniqueChannels} channel${s.uniqueChannels === 1 ? "" : "s"}`,
+    `• ${plural(s.uniqueThreads, "thread")} from ${plural(s.uniqueUsers, "user")} across ${plural(s.uniqueChannels, "channel")}`,
+    `• ${plural(s.totalTurns, "turn")} total (avg ${ratio(s.totalTurns, s.uniqueThreads, 1)} per thread)`,
   ];
   const outcomeLine = formatOutcomes(s.outcomeCounts, s.totalTurns);
   if (outcomeLine) lines.push(`• ${outcomeLine}`);
   if (s.latency.p50 !== null) lines.push(`• latency: p50 ${fmtMs(s.latency.p50)}, p95 ${fmtMs(s.latency.p95)}`);
-  if (s.steps.p50 !== null) lines.push(`• steps: p50 ${s.steps.p50}, p95 ${s.steps.p95}`);
+  const tokenLine = formatTokensAndCost(s.totals);
+  if (tokenLine) lines.push(`• ${tokenLine}`);
   if (s.topUsers.length > 0) {
-    lines.push("", "*Top users*");
-    for (const u of s.topUsers) lines.push(`• <@${u.user_id}> — ${u.count}`);
+    lines.push("", "*Top users (by threads)*");
+    for (const u of s.topUsers) lines.push(`• <@${u.user_id}> — ${plural(u.threads, "thread")} (${plural(u.count, "turn")})`);
   }
   if (s.topChannels.length > 0) {
-    lines.push("", "*Top channels*");
+    lines.push("", "*Top channels (by threads)*");
     for (const c of s.topChannels) {
       const label = c.channel_name ? `#${c.channel_name}` : `<#${c.channel_id}>`;
-      lines.push(`• ${label} — ${c.count}`);
+      lines.push(`• ${label} — ${plural(c.threads, "thread")} (${plural(c.count, "turn")})`);
     }
   }
   return lines.join("\n");
@@ -93,16 +99,19 @@ function renderUser(s: StatsSummary, userId: string, windowLabel: string): strin
   if (s.totalTurns === 0) return `*Stats for <@${userId}> (${windowLabel})*\nNo activity yet.`;
   const lines = [
     `*Stats for <@${userId}> (${windowLabel})*`,
-    `• ${s.totalTurns} turn${s.totalTurns === 1 ? "" : "s"} across ${s.uniqueChannels} channel${s.uniqueChannels === 1 ? "" : "s"}`,
+    `• ${plural(s.uniqueThreads, "thread")} across ${plural(s.uniqueChannels, "channel")}`,
+    `• ${plural(s.totalTurns, "turn")} total`,
   ];
   const outcomeLine = formatOutcomes(s.outcomeCounts, s.totalTurns);
   if (outcomeLine) lines.push(`• ${outcomeLine}`);
   if (s.latency.p50 !== null) lines.push(`• latency: p50 ${fmtMs(s.latency.p50)}, p95 ${fmtMs(s.latency.p95)}`);
+  const tokenLine = formatTokensAndCost(s.totals);
+  if (tokenLine) lines.push(`• ${tokenLine}`);
   if (s.topChannels.length > 0) {
     lines.push("", "*Channels used*");
     for (const c of s.topChannels) {
       const label = c.channel_name ? `#${c.channel_name}` : `<#${c.channel_id}>`;
-      lines.push(`• ${label} — ${c.count}`);
+      lines.push(`• ${label} — ${plural(c.threads, "thread")}`);
     }
   }
   return lines.join("\n");
@@ -112,14 +121,17 @@ function renderChannel(s: StatsSummary, channelId: string, windowLabel: string):
   if (s.totalTurns === 0) return `*Stats for <#${channelId}> (${windowLabel})*\nNo activity yet.`;
   const lines = [
     `*Stats for <#${channelId}> (${windowLabel})*`,
-    `• ${s.totalTurns} turn${s.totalTurns === 1 ? "" : "s"} from ${s.uniqueUsers} user${s.uniqueUsers === 1 ? "" : "s"}`,
+    `• ${plural(s.uniqueThreads, "thread")} from ${plural(s.uniqueUsers, "user")}`,
+    `• ${plural(s.totalTurns, "turn")} total`,
   ];
   const outcomeLine = formatOutcomes(s.outcomeCounts, s.totalTurns);
   if (outcomeLine) lines.push(`• ${outcomeLine}`);
   if (s.latency.p50 !== null) lines.push(`• latency: p50 ${fmtMs(s.latency.p50)}, p95 ${fmtMs(s.latency.p95)}`);
+  const tokenLine = formatTokensAndCost(s.totals);
+  if (tokenLine) lines.push(`• ${tokenLine}`);
   if (s.topUsers.length > 0) {
     lines.push("", "*Top users*");
-    for (const u of s.topUsers) lines.push(`• <@${u.user_id}> — ${u.count}`);
+    for (const u of s.topUsers) lines.push(`• <@${u.user_id}> — ${plural(u.threads, "thread")}`);
   }
   return lines.join("\n");
 }
@@ -128,7 +140,7 @@ function renderQuality(s: StatsSummary, windowLabel: string): string {
   if (s.totalTurns === 0) return `*Quality (${windowLabel})*\nNo activity yet.`;
   const lines = [
     `*Quality (${windowLabel})*`,
-    `• ${s.totalTurns} turn${s.totalTurns === 1 ? "" : "s"} total`,
+    `• ${plural(s.uniqueThreads, "thread")} / ${plural(s.totalTurns, "turn")}`,
   ];
   for (const [outcome, n] of Object.entries(s.outcomeCounts).sort((a, b) => b[1] - a[1])) {
     const pct = Math.round((n / s.totalTurns) * 100);
@@ -136,7 +148,35 @@ function renderQuality(s: StatsSummary, windowLabel: string): string {
   }
   if (s.latency.p50 !== null) lines.push("", `*Latency on success*`, `• p50: ${fmtMs(s.latency.p50)}`, `• p95: ${fmtMs(s.latency.p95)}`);
   if (s.steps.p50 !== null) lines.push("", `*Step counts on success*`, `• p50: ${s.steps.p50}`, `• p95: ${s.steps.p95}`);
+  const tokenLine = formatTokensAndCost(s.totals);
+  if (tokenLine) lines.push("", `*Usage*`, `• ${tokenLine}`);
   return lines.join("\n");
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function ratio(num: number, den: number, decimals: number): string {
+  if (den === 0) return "—";
+  return (num / den).toFixed(decimals);
+}
+
+function formatTokensAndCost(t: StatsSummary["totals"]): string | null {
+  if (t.inputTokens === 0 && t.outputTokens === 0 && t.costUsd === 0) return null;
+  const parts: string[] = [];
+  if (t.inputTokens > 0 || t.outputTokens > 0) {
+    parts.push(`${fmtTokens(t.inputTokens)} in / ${fmtTokens(t.outputTokens)} out`);
+  }
+  if (t.cacheReadTokens > 0 || t.cacheWriteTokens > 0) {
+    parts.push(`cache: ${fmtTokens(t.cacheReadTokens)} read, ${fmtTokens(t.cacheWriteTokens)} write`);
+  }
+  if (t.costUsd > 0) parts.push(`$${t.costUsd.toFixed(4)}`);
+  return parts.join(" · ");
+}
+
+function fmtTokens(n: number): string {
+  return compactNum.format(n);
 }
 
 function formatOutcomes(outcomeCounts: Record<string, number>, total: number): string {
@@ -154,7 +194,5 @@ function formatOutcomes(outcomeCounts: Record<string, number>, total: number): s
 
 function fmtMs(ms: number | null): string {
   if (ms === null) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${(ms / 60_000).toFixed(1)}min`;
+  return prettyMs(ms, { secondsDecimalDigits: 1, millisecondsDecimalDigits: 0 });
 }

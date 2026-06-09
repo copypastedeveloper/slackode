@@ -47,15 +47,17 @@ if [ ! -d "$REPO_DIR/.git" ]; then
   git clone "$REPO_URL" "$REPO_DIR"
 fi
 
-# Optionally pin opencode to a specific binary parked at .local/bin/opencode-<ver>.
-# Set OPENCODE_PIN to the version suffix (e.g. "1.14.48") to reproduce a prod-version bug.
-# Default: use the system opencode (currently a streaming-compatible version).
-if [ -n "${OPENCODE_PIN:-}" ] && [ -x "$ROOT/.local/bin/opencode-$OPENCODE_PIN" ]; then
-  ln -sf "$ROOT/.local/bin/opencode-$OPENCODE_PIN" "$ROOT/.local/bin/opencode"
+# Pin opencode to match prod by default (1.15.13). Override with OPENCODE_PIN=<ver>
+# when you need to reproduce a bug against a different version. Falls back to the
+# system opencode only if no pinned binary is parked at .local/bin/opencode-<ver>.
+DEFAULT_OPENCODE_PIN="1.15.13"
+PIN="${OPENCODE_PIN:-$DEFAULT_OPENCODE_PIN}"
+if [ -x "$ROOT/.local/bin/opencode-$PIN" ]; then
+  ln -sf "$ROOT/.local/bin/opencode-$PIN" "$ROOT/.local/bin/opencode"
   export PATH="$ROOT/.local/bin:$PATH"
   echo "[dev] Using PINNED opencode: $($ROOT/.local/bin/opencode --version)"
 else
-  echo "[dev] Using system opencode: $(command -v opencode >/dev/null 2>&1 && opencode --version || echo 'not found')"
+  echo "[dev] Pin $PIN not found at .local/bin/opencode-$PIN; using system opencode: $(command -v opencode >/dev/null 2>&1 && opencode --version || echo 'not found')"
 fi
 
 # Verify opencode is installed (slackode will spawn it).

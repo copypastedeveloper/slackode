@@ -282,6 +282,12 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
     durationMs: stream.diag.durationMs,
     stepCount: stream.diag.stepStarts,
     compacted: stream.compacted,
+    inputTokens: stream.usage.inputTokens,
+    outputTokens: stream.usage.outputTokens,
+    reasoningTokens: stream.usage.reasoningTokens,
+    cacheReadTokens: stream.usage.cacheReadTokens,
+    cacheWriteTokens: stream.usage.cacheWriteTokens,
+    costUsd: stream.usage.costUsd,
   };
 
   // Watchdog bail-out: opencode went silent (no events) or hit the hard ceiling.
@@ -335,6 +341,12 @@ interface TurnRecordingInput {
   compacted?: boolean;
   outcome: TurnOutcome;
   outcomeDetail?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  costUsd?: number;
 }
 
 /**
@@ -364,5 +376,11 @@ function recordTurnIfRequested(
     outcome: input.outcome,
     outcomeDetail: input.outcomeDetail,
     compacted: input.compacted,
+    inputTokens: input.inputTokens,
+    outputTokens: input.outputTokens,
+    reasoningTokens: input.reasoningTokens,
+    cacheReadTokens: input.cacheReadTokens,
+    cacheWriteTokens: input.cacheWriteTokens,
+    costUsd: input.costUsd,
   });
 }

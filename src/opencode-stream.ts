@@ -52,6 +52,16 @@ export interface StreamDiag {
   skipNextStop: boolean;
 }
 
+/** Summed token counts + cost across all step-finish events in this turn. */
+export interface UsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: number;
+}
+
 export interface StreamResult {
   /** Assistant text accepted from the stream. Empty string if the model produced nothing. */
   text: string;
@@ -63,6 +73,8 @@ export interface StreamResult {
   toolsUsed: Array<{ name: string; calls: number }>;
   /** Skills the agent activated (extracted best-effort from `skill` tool inputs). */
   skillsUsed: string[];
+  /** Summed usage across step-finish events. Zero on providers/versions that don't report it. */
+  usage: UsageTotals;
 }
 
 function getToolStateType(part: { state?: unknown }): string | undefined {
@@ -104,6 +116,10 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
   const activeTools: Map<string, string> = new Map();
   const toolCallCounts: Map<string, number> = new Map();
   const skillsActivated: Set<string> = new Set();
+  const usage: UsageTotals = {
+    inputTokens: 0, outputTokens: 0, reasoningTokens: 0,
+    cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0,
+  };
   let done = false;
   let answerCaptured = false;
   let compacted = false;
@@ -233,6 +249,20 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
         } else if (part.type === "step-finish") {
           const reason = (part as { reason?: string }).reason;
           diag.stepFinishReasons.push(reason ?? "(none)");
+          // Accumulate cost + tokens from this step. Best-effort: some providers/versions
+          // omit these fields; missing values stay at 0 in the totals.
+          const usagePart = part as {
+            cost?: number;
+            tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } };
+          };
+          if (typeof usagePart.cost === "number") usage.costUsd += usagePart.cost;
+          if (usagePart.tokens) {
+            usage.inputTokens += usagePart.tokens.input ?? 0;
+            usage.outputTokens += usagePart.tokens.output ?? 0;
+            usage.reasoningTokens += usagePart.tokens.reasoning ?? 0;
+            usage.cacheReadTokens += usagePart.tokens.cache?.read ?? 0;
+            usage.cacheWriteTokens += usagePart.tokens.cache?.write ?? 0;
+          }
           if (reason === "stop") {
             if (skipNextStop) {
               console.log(`[opencode] Skipping post-compaction auto-continue stop for session ${sessionId}`);
@@ -287,5 +317,6 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
     diag,
     toolsUsed,
     skillsUsed: [...skillsActivated],
+    usage,
   };
 }
