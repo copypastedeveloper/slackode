@@ -423,6 +423,12 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     tools,
     files,
     repo,
+    analytics: {
+      userId: slackCtx.userId,
+      channelId: channel,
+      channelName: slackCtx.channelName,
+      threadKey: threadTs,
+    },
   };
 
   let result;
