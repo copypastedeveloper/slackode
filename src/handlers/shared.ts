@@ -115,7 +115,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     }
 
     // ── Stats (open to all, read-only) ──
-    const statsReply = handleStatsCommand(question);
+    const statsReply = handleStatsCommand(question, channelId);
     if (statsReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: statsReply });
       return;

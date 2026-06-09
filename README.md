@@ -22,6 +22,8 @@ A Slack bot that answers questions about your codebase, writes code, and accumul
 - **Linked threads** — paste a Slack thread link and the bot fetches that conversation as context
 - **Role-aware responses** — pulls your Slack profile to adjust technical depth
 - **Progress streaming** — shows intermediate status as the agent works
+- **Native skill discovery** — `.claude/skills/<name>/SKILL.md` files in the repo are loaded by opencode automatically; the agent uses them as first-party tools
+- **Usage analytics** — every Q&A round is persisted (user, channel, agent, tools/skills used, duration, step count, token usage, cost, outcome) and queryable via `stats`
 
 ## Prerequisites
 
@@ -223,11 +225,23 @@ Manage company-wide knowledge directly from Slack. Entries are stored in SQLite,
 
 `knowledge list` and `knowledge view` are open to all users. All other commands require admin role. The `knowledge import` command accepts attached `.md` files and creates/updates entries from them (filename becomes the title).
 
-### Repo-level knowledge (.opencode/rules/)
+**Google Docs auto-sync.** Share Google Docs with the bot's GCP service account and a background job imports them as `global`-scope knowledge entries, re-syncing when `modifiedTime` advances. Activated by setting `GOOGLE_APPLICATION_CREDENTIALS` to a service account JSON path; runs every `GDOCS_SYNC_INTERVAL_MS` (default 1h).
 
-Repos can check in `.opencode/rules/*.md` files — OpenCode loads them automatically as system instructions. Use this for repo-specific conventions and context that lives with the code.
+```
+@Slackode knowledge sources           # which docs are currently synced
+@Slackode knowledge sync              # trigger an immediate sync (admin)
+```
 
-The filenames `repo-overview.md`, `directory-map.md`, `key-abstractions.md`, and `conventions.md` are reserved for auto-generation and will be overwritten. Use custom names for your own rules.
+### Repo-level knowledge (.opencode/rules/) and skills (.claude/skills/)
+
+Repos can check in two kinds of context that ride along with the code:
+
+- **`.opencode/rules/*.md`** — loaded automatically by OpenCode as system instructions. Use for repo-specific conventions.
+- **`.claude/skills/<name>/SKILL.md`** (and `.opencode/skill[s]/`) — discovered natively by OpenCode once the `skill` tool is enabled in the generated config (which slackode does by default). The agent treats them as first-party tools and reads the SKILL.md body on demand.
+
+Per-repo gating of skill discovery: `repo allow-skills <name> on|off`. Defaults to `on`.
+
+The rule filenames `repo-overview.md`, `directory-map.md`, `key-abstractions.md`, and `conventions.md` are reserved for auto-generation and will be overwritten. Use custom names for your own rules.
 
 ### Channel configuration
 
@@ -277,6 +291,43 @@ Manage the bot's MCP tool registry at runtime — no code changes or restarts ne
 ```
 
 Adding, removing, enabling, disabling, or setting a key for a tool automatically restarts the OpenCode server.
+
+### OAuth-capable MCP tools
+
+Some MCP servers (Linear's hosted MCP, Document360, etc.) authenticate with OAuth 2.0 + PKCE instead of a static API key. `tool add` detects this — pick `oauth` when prompted for auth type — and walks you through the flow:
+
+```
+@Slackode tool add linear-mcp        # conversational; choose `oauth` for auth_type
+# bot posts: "Click here to authorize" + a "Complete Authorization" button
+# you authorize upstream, get a redirect to public/oauth-callback.html which displays
+# the code + state; you paste them into the modal opened by the button
+```
+
+No callback HTTP server runs inside the bot — instead the OAuth redirect points at a static page (`public/oauth-callback.html`) hosted on any HTTPS host. Set `OAUTH_REDIRECT_URI` in `.env` to that hosted page. Tokens are encrypted at rest with `CONFIG_ENCRYPTION_KEY` and refreshed in the background every 30 minutes.
+
+For manual code entry without the modal:
+
+```
+@Slackode tool auth my-oauth-tool    # restart the flow
+@Slackode tool auth-code my-oauth-tool <code> <state>
+```
+
+### Usage analytics
+
+Every Q&A round is captured in a local `turns` table — user, channel, agent, repo, tools enabled vs actually used, skills activated, duration, step count, input/output/reasoning/cache tokens, cost, outcome (`success` / `empty` / `aborted` / `timeout` / `too_long` / `provider_error` / `error`), and a compacted flag.
+
+Query from Slack with `stats`:
+
+```
+@Slackode stats                       # current channel, last 24h (default)
+@Slackode stats --all                 # whole workspace
+@Slackode stats --week                # / --month — wider window
+@Slackode stats --user @nathan        # that user (still scoped to current channel)
+@Slackode stats --channel #core-qa    # a specific channel
+@Slackode stats --quality             # outcome breakdown + p50/p95 latency, steps, tokens, cost
+```
+
+Stats are read-only and open to all users. Threads are the headline metric (count of distinct conversations); turns inside threads are shown as a secondary number.
 
 ## Architecture
 
@@ -413,48 +464,89 @@ For the full list, see the [OpenCode providers docs](https://opencode.ai/docs/pr
 
 ## Development
 
+Production-style build:
+
 ```bash
 npm install
 npm run build
 docker compose up --build
 ```
 
+### Local iteration (`npm run dev:local`)
+
+For fast local debugging without rebuilding the container, `scripts/dev.sh` runs slackode + opencode against a checkout under `.local/` (gitignored):
+
+```bash
+npm run dev:local
+```
+
+What the script does:
+- Loads `.env` and resolves `REPO_DIR`, `REPOS_BASE_DIR`, `SESSIONS_DB_PATH`, `BASE_CONFIG_PATH`, `TOOLS_SEED_PATH` to paths under `.local/`.
+- Clones `REPO_URL` into `.local/repo` on first run.
+- Pins opencode to `1.15.13` by default (matches prod). Override with `OPENCODE_PIN=<ver>` to reproduce a different version's behavior. The pinned binary lives at `.local/bin/opencode-<ver>`.
+- When `PROVIDER=amazon-bedrock`, resolves AWS credentials from your active CLI session via `aws configure export-credentials --format env` and exports them — no need to paste keys into `.env`.
+- Execs `tsx src/index.ts` directly (not via `npm`) so `SIGINT` propagates cleanly and the shutdown handler can fully run.
+
+Caveats:
+- You'll want a separate Slack app for local (different `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`) so events don't collide with prod.
+- AWS session credentials expire (~12h). Restart `dev:local` when Bedrock starts returning SigV4 errors.
+
 Source layout:
 
 ```
 src/
-├── index.ts              # Bolt app, Socket Mode, action handlers, startup
-├── opencode.ts           # OpenCode SDK client, SSE streaming, session mgmt
-├── opencode-config.ts    # Generates opencode.json from DB (agents, MCP, tools)
-├── opencode-server.ts    # Spawns/stops/restarts OpenCode server processes
-├── context-gen.ts        # Auto-generates repo context files
-├── context-prefix.ts     # Builds mode-specific system prompts (Q&A, coding, planning)
-├── sessions.ts           # SQLite schema + CRUD (sessions, channels, tools, repos, memories)
-├── knowledge.ts          # DB-backed knowledge read accessors (used by context prefix)
-├── tools.ts              # Tool registry helpers
-├── crypto.ts             # AES-256-GCM encrypt/decrypt for tool API keys
-├── coding-session.ts     # Worktree management, PR creation, session lifecycle
-├── repo-manager.ts       # Multi-repo clone, pull, context generation
-├── constants.ts          # Action IDs, ports, timeouts
+├── index.ts                # Bolt app, Socket Mode, action handlers, startup
+├── opencode.ts             # OpenCode SDK client + askQuestion orchestrator
+├── opencode-stream.ts      # SSE event loop: tracks text, tools, skills, tokens, diagnostics
+├── opencode-config.ts      # Generates opencode.json from DB (agents, MCP, tools, skill enable)
+├── opencode-server.ts      # Spawns/stops/restarts OpenCode server processes
+├── context-gen.ts          # Auto-generates repo context files
+├── context-prefix.ts       # Builds mode-specific system prompts (Q&A, coding, planning)
+├── sessions.ts             # Thin re-export shim — all DB code lives in src/db/
+├── skill-manifest.ts       # Cleans stale .opencode/rules/skills.md (legacy)
+├── gdocs-sync.ts           # Google Docs → knowledge background sync
+├── knowledge.ts            # DB-backed knowledge read accessors (used by context prefix)
+├── tools.ts                # Tool registry helpers
+├── crypto.ts               # AES-256-GCM encrypt/decrypt for keys + OAuth tokens
+├── coding-session.ts       # Worktree management, PR creation, session lifecycle
+├── repo-manager.ts         # Multi-repo clone, pull, context generation
+├── constants.ts            # Action IDs, ports, timeouts
+├── db/                     # Per-domain SQLite modules (replaced 1500-line sessions.ts)
+│   ├── index.ts            # Schema bootstrap + getDb + closeDb + AuthType
+│   ├── sessions.ts         # thread → opencode session_id mapping
+│   ├── channels.ts         # Per-channel agent / tools / config / repo
+│   ├── tools.ts            # MCP tool registry
+│   ├── oauth.ts            # OAuth state + pending PKCE states
+│   ├── repos.ts            # Repo registry
+│   ├── coding.ts           # Coding session statuses + records
+│   ├── permissions.ts      # RBAC
+│   ├── memory.ts           # Memories
+│   ├── github.ts           # User GitHub PATs
+│   ├── knowledge.ts        # Knowledge entries + Google Docs sources
+│   └── turns.ts            # Analytics: turn recording + stats queries
 ├── handlers/
-│   ├── shared.ts         # Shared Q&A pipeline (session mgmt, progress, formatting)
-│   ├── mention.ts        # @mention preprocessing and command routing
-│   ├── dm.ts             # DM preprocessing
-│   ├── config-commands.ts # config set/get/clear for agent, tools, prompt, repo
-│   ├── tool-commands.ts  # tool add/remove/list/set-key/enable/disable
-│   ├── repo-commands.ts  # repo add/remove/list/default/pull
-│   ├── code-commands.ts  # Coding thread commands (status, pr, done, cancel)
-│   ├── coding-handler.ts # Coding session orchestration (plan, approve, execute)
-│   ├── memory-commands.ts # remember/recall/forget/memories
-│   └── knowledge-commands.ts # knowledge add/update/remove/import/list/view
+│   ├── shared.ts           # Shared Q&A pipeline (session mgmt, progress, formatting)
+│   ├── mention.ts          # @mention preprocessing and command routing
+│   ├── dm.ts               # DM preprocessing
+│   ├── config-commands.ts  # config set/get/clear + list channels
+│   ├── tool-commands.ts    # tool add/remove/list/set-key/enable/disable + OAuth flow
+│   ├── repo-commands.ts    # repo add/remove/list/default/sync + allow-skills
+│   ├── code-commands.ts    # Coding thread commands (status, pr, done, cancel)
+│   ├── coding-handler.ts   # Coding session orchestration (plan, approve, execute)
+│   ├── memory-commands.ts  # remember/recall/forget/memories
+│   ├── knowledge-commands.ts # knowledge add/update/remove/import/list/view/sources/sync
+│   ├── help-commands.ts    # help, commands, help <family>
+│   └── stats-commands.ts   # stats (default channel-scoped) — usage analytics
 ├── mcp/
 │   ├── knowledge-server.ts # MCP server: search_knowledge, recall_memories, save_memory
-│   └── vector-store.ts    # LanceDB vector index + local embeddings (all-MiniLM-L6-v2)
+│   ├── vector-store.ts     # LanceDB vector index + local embeddings (all-MiniLM-L6-v2)
+│   ├── oauth-provider.ts   # MCPOAuthProvider for MCP servers with OAuth 2.0 + PKCE
+│   └── oauth-refresh.ts    # Periodic OAuth token refresh + ensureFreshToken
 └── utils/
-    ├── formatting.ts     # Markdown → Slack Block Kit conversion
-    ├── slack-context.ts  # Fetches user/channel info from Slack API
-    ├── slack-files.ts    # Slack file download + base64 data URI conversion
-    └── progress.ts       # Throttled Slack message updater
+    ├── formatting.ts       # Markdown → Slack Block Kit conversion
+    ├── slack-context.ts    # Fetches user/channel info from Slack API
+    ├── slack-files.ts      # Slack file download + base64 data URI conversion
+    └── progress.ts         # Throttled Slack message updater
 ```
 
 ## Security

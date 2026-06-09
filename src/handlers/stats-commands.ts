@@ -7,17 +7,20 @@ const compactNum = new Intl.NumberFormat("en", { notation: "compact", maximumFra
 /**
  * Handle `stats` Slack commands.
  *
- *   stats                  → last 24h overview (totals, outcomes, top users, top channels, latency)
- *   stats --day            → same as bare `stats`
- *   stats --week           → last 7 days
- *   stats --month          → last 30 days
- *   stats --user @uid      → that user's volume across the default 24h window
- *   stats --channel #cid   → that channel's volume across the default 24h window
+ * By default scopes to the channel the command was sent from. Pass `--all`
+ * for a workspace-wide view, or `--channel #cid` for a specific other channel.
+ *
+ *   stats                  → current channel, last 24h
+ *   stats --all            → workspace-wide overview
+ *   stats --day|week|month → window selection (default: day)
+ *   stats --user @uid      → that user's volume (still scoped to current channel
+ *                            unless --all or --channel is also given)
+ *   stats --channel #cid   → that specific channel
  *   stats --quality        → outcome breakdown + latency/step percentiles
  *
  * Read-only — open to all users.
  */
-export function handleStatsCommand(command: string): string | null {
+export function handleStatsCommand(command: string, currentChannelId: string): string | null {
   const m = command.trim().match(/^stats\b(.*)$/i);
   if (!m) return null;
   const args = m[1].trim();
@@ -26,32 +29,46 @@ export function handleStatsCommand(command: string): string | null {
   const window = pickWindow(flags);
   const sinceTs = Math.floor(Date.now() / 1000) - window.seconds;
 
+  // Default scope: current channel. Override with `--all` or `--channel #other`.
+  const effectiveChannelId = flags.all
+    ? undefined
+    : flags.channelId ?? currentChannelId;
+
   const summary = getStatsSummary({
     sinceTs,
     userId: flags.userId,
-    channelId: flags.channelId,
+    channelId: effectiveChannelId,
   });
 
-  if (flags.quality) return renderQuality(summary, window.label);
-  if (flags.userId) return renderUser(summary, flags.userId, window.label);
-  if (flags.channelId) return renderChannel(summary, flags.channelId, window.label);
+  if (flags.quality) return renderQuality(summary, window.label, scopeLabel(flags, currentChannelId));
+  if (flags.userId) return renderUser(summary, flags.userId, window.label, scopeLabel(flags, currentChannelId));
+  // Show channel detail when user explicitly named one OR when we're scoped to the current channel.
+  if (effectiveChannelId) return renderChannel(summary, effectiveChannelId, window.label);
   return renderOverview(summary, window.label);
+}
+
+function scopeLabel(flags: ParsedFlags, currentChannelId: string): string {
+  if (flags.all) return "workspace-wide";
+  if (flags.channelId) return `in <#${flags.channelId}>`;
+  return `in <#${currentChannelId}>`;
 }
 
 interface ParsedFlags {
   scope: "day" | "week" | "month";
   userId?: string;
   channelId?: string;
+  all: boolean;
   quality: boolean;
 }
 
 function parseFlags(args: string): ParsedFlags {
-  const flags: ParsedFlags = { scope: "day", quality: false };
+  const flags: ParsedFlags = { scope: "day", all: false, quality: false };
   // --week / --month / --day
   if (/--week\b/i.test(args)) flags.scope = "week";
   else if (/--month\b/i.test(args)) flags.scope = "month";
   else if (/--day\b/i.test(args)) flags.scope = "day";
   if (/--quality\b/i.test(args)) flags.quality = true;
+  if (/--all\b/i.test(args)) flags.all = true;
   // --user @U123 or --user U123 — Slack expands mentions to <@U123>
   const userMatch = args.match(/--user\s+(?:<@([A-Z0-9]+)(?:\|[^>]+)?>|@?([A-Z0-9]+))/i);
   if (userMatch) flags.userId = userMatch[1] ?? userMatch[2];
@@ -95,10 +112,10 @@ function renderOverview(s: StatsSummary, windowLabel: string): string {
   return lines.join("\n");
 }
 
-function renderUser(s: StatsSummary, userId: string, windowLabel: string): string {
-  if (s.totalTurns === 0) return `*Stats for <@${userId}> (${windowLabel})*\nNo activity yet.`;
+function renderUser(s: StatsSummary, userId: string, windowLabel: string, scope: string): string {
+  if (s.totalTurns === 0) return `*Stats for <@${userId}> ${scope} (${windowLabel})*\nNo activity yet.`;
   const lines = [
-    `*Stats for <@${userId}> (${windowLabel})*`,
+    `*Stats for <@${userId}> ${scope} (${windowLabel})*`,
     `• ${plural(s.uniqueThreads, "thread")} across ${plural(s.uniqueChannels, "channel")}`,
     `• ${plural(s.totalTurns, "turn")} total`,
   ];
@@ -136,10 +153,10 @@ function renderChannel(s: StatsSummary, channelId: string, windowLabel: string):
   return lines.join("\n");
 }
 
-function renderQuality(s: StatsSummary, windowLabel: string): string {
-  if (s.totalTurns === 0) return `*Quality (${windowLabel})*\nNo activity yet.`;
+function renderQuality(s: StatsSummary, windowLabel: string, scope: string): string {
+  if (s.totalTurns === 0) return `*Quality ${scope} (${windowLabel})*\nNo activity yet.`;
   const lines = [
-    `*Quality (${windowLabel})*`,
+    `*Quality ${scope} (${windowLabel})*`,
     `• ${plural(s.uniqueThreads, "thread")} / ${plural(s.totalTurns, "turn")}`,
   ];
   for (const [outcome, n] of Object.entries(s.outcomeCounts).sort((a, b) => b[1] - a[1])) {
