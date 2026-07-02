@@ -109,6 +109,41 @@ export function advanceJob(id: string, nextRunAt: number | null): void {
   }
 }
 
+export interface UpdateJobFields {
+  cron?: string;
+  timezone?: string;
+  runAt?: number | null;
+  kind?: JobKind;
+  channelId?: string;
+  threadTs?: string | null;
+  prompt?: string;
+  nextRunAt?: number | null;
+}
+
+/**
+ * Update a job's schedule/prompt/target. Any edit resets probation — changed
+ * behavior must re-earn direct posting.
+ */
+export function updateJob(id: string, fields: UpdateJobFields): void {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  const map: Array<[keyof UpdateJobFields, string]> = [
+    ["cron", "cron"], ["timezone", "timezone"], ["runAt", "run_at"], ["kind", "kind"],
+    ["channelId", "channel_id"], ["threadTs", "thread_ts"], ["prompt", "prompt"], ["nextRunAt", "next_run_at"],
+  ];
+  for (const [key, column] of map) {
+    if (fields[key] !== undefined) {
+      sets.push(`${column} = ?`);
+      values.push(fields[key]);
+    }
+  }
+  if (sets.length === 0) return;
+  sets.push("probation_remaining = 3", "updated_at = unixepoch()");
+  getDb()
+    .prepare(`UPDATE scheduled_jobs SET ${sets.join(", ")} WHERE id = ?`)
+    .run(...values, id);
+}
+
 export function setJobEnabled(id: string, enabled: boolean, nextRunAt?: number | null): void {
   getDb()
     .prepare("UPDATE scheduled_jobs SET enabled = ?, next_run_at = COALESCE(?, next_run_at), updated_at = unixepoch() WHERE id = ?")

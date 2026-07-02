@@ -4,8 +4,7 @@ import {
   createJob, getJob, listJobs, deleteJob, setJobEnabled,
   decrementProbation, getRecentRuns, getJobCost, type JobRow,
 } from "../db/jobs.js";
-import { nextCronRun, validateCron } from "../scheduler.js";
-import { parseSchedulePhrase, looksLikeCron } from "../schedule-parse.js";
+import { parseSchedulePhrase, looksLikeCron, nextCronRun, validateCron } from "../schedule-parse.js";
 import { runJob } from "../job-runner.js";
 
 const DEFAULT_TZ = process.env.JOBS_DEFAULT_TZ || "America/Chicago";

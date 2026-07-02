@@ -12,9 +12,28 @@
  * Raw cron expressions pass through untouched.
  */
 
+import { Cron } from "croner";
+
 export interface ParsedSchedule {
   cron: string;
   description: string;
+}
+
+/** Compute the next fire time (unixepoch seconds) for a cron expression, or null when it never fires again. */
+export function nextCronRun(expression: string, timezone: string, from?: Date): number | null {
+  const next = new Cron(expression, { timezone }).nextRun(from ?? new Date());
+  return next ? Math.floor(next.getTime() / 1000) : null;
+}
+
+/** Validate a cron expression + timezone pair; returns an error message or undefined. */
+export function validateCron(expression: string, timezone: string): string | undefined {
+  try {
+    const next = new Cron(expression, { timezone }).nextRun();
+    if (!next) return "That cron expression never fires.";
+    return undefined;
+  } catch (err) {
+    return `Invalid cron expression or timezone: ${err instanceof Error ? err.message : String(err)}`;
+  }
 }
 
 const DAYS: Record<string, number> = {

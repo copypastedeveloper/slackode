@@ -1,6 +1,6 @@
-import { Cron } from "croner";
 import type { WebClient } from "@slack/web-api";
 import { getDueJobs, advanceJob, recordJobOutcome, markOrphanedRuns, type JobRow } from "./db/jobs.js";
+import { nextCronRun } from "./schedule-parse.js";
 import { runJob } from "./job-runner.js";
 
 const TICK_MS = 30_000;
@@ -9,23 +9,6 @@ const CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 let tickInterval: ReturnType<typeof setInterval> | undefined;
 let running = false;
-
-/** Compute the next fire time (unixepoch seconds) for a cron job, or null when it never fires again. */
-export function nextCronRun(expression: string, timezone: string, from?: Date): number | null {
-  const next = new Cron(expression, { timezone }).nextRun(from ?? new Date());
-  return next ? Math.floor(next.getTime() / 1000) : null;
-}
-
-/** Validate a cron expression + timezone pair; returns an error message or undefined. */
-export function validateCron(expression: string, timezone: string): string | undefined {
-  try {
-    const next = new Cron(expression, { timezone }).nextRun();
-    if (!next) return "That cron expression never fires.";
-    return undefined;
-  } catch (err) {
-    return `Invalid cron expression or timezone: ${err instanceof Error ? err.message : String(err)}`;
-  }
-}
 
 async function tick(client: WebClient): Promise<void> {
   if (running) return; // previous tick's runs still in flight

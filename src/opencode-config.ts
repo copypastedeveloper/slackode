@@ -110,11 +110,32 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
     config.tools[`${tool.name}*`] = false;
   }
 
-  // Always register the built-in knowledge MCP server (local stdio, no API key needed).
+  // Always register the built-in scheduler MCP server so the conversational
+  // agent can create/edit scheduled jobs. Deliberately NOT enabled for the
+  // `job` agent — unattended runs must not create or edit jobs.
   config.mcp = config.mcp || {};
+  const mcpDistDir = process.env.MCP_DIST_DIR ?? "/app/dist";
+  config.mcp.scheduler = {
+    type: "local",
+    command: ["node", `${mcpDistDir}/mcp/scheduler-server.js`],
+    enabled: true,
+    environment: {
+      ...(process.env.SESSIONS_DB_PATH ? { SESSIONS_DB_PATH: process.env.SESSIONS_DB_PATH } : {}),
+      ...(process.env.JOBS_DEFAULT_TZ ? { JOBS_DEFAULT_TZ: process.env.JOBS_DEFAULT_TZ } : {}),
+    },
+  };
+  config.tools["scheduler*"] = true;
+  for (const agentName of Object.keys(config.agent)) {
+    if (config.agent[agentName].tools) {
+      config.agent[agentName].tools["scheduler*"] = agentName !== "job";
+    }
+  }
+  console.log("[config] Scheduler MCP server configured.");
+
+  // Always register the built-in knowledge MCP server (local stdio, no API key needed).
   config.mcp.knowledge = {
     type: "local",
-    command: ["node", "/app/dist/mcp/knowledge-server.js"],
+    command: ["node", `${mcpDistDir}/mcp/knowledge-server.js`],
     enabled: true,
     environment: {
       ...(process.env.SESSIONS_DB_PATH ? { SESSIONS_DB_PATH: process.env.SESSIONS_DB_PATH } : {}),

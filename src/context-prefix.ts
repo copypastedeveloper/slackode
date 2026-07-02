@@ -240,10 +240,12 @@ const INSTRUCTION_BUILDERS: Record<PrefixMode, (opts: PrefixOpts) => string[]> =
 // ── Shared context/thread/linked-thread assembly ──
 
 function appendContextBlock(lines: string[], ctx: SlackContext): void {
-  lines.push(`User: ${ctx.userName}`);
+  // IDs are included so tools that take user/channel arguments (e.g. the
+  // scheduler tools) can be called with the real Slack IDs, not display names.
+  lines.push(`User: ${ctx.userName} (user ID: ${ctx.userId})`);
   if (ctx.userTitle) lines.push(`Role/Title: ${ctx.userTitle}`);
   if (ctx.userStatusText) lines.push(`Status: ${ctx.userStatusText}`);
-  lines.push(`Channel: ${ctx.channelName} (${ctx.channelType})`);
+  lines.push(`Channel: ${ctx.channelName} (channel ID: ${ctx.channelId}, ${ctx.channelType})`);
   if (ctx.channelTopic) lines.push(`Channel topic: ${ctx.channelTopic}`);
   if (ctx.channelPurpose) lines.push(`Channel purpose: ${ctx.channelPurpose}`);
   if (ctx.customPrompt) lines.push(`Custom instructions for this channel: ${ctx.customPrompt}`);

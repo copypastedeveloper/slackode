@@ -1,0 +1,200 @@
+#!/usr/bin/env node
+/**
+ * Scheduler MCP server — lets the conversational agent create and edit
+ * scheduled jobs on the user's behalf ("schedule this as a weekly job",
+ * "make that run Fridays instead").
+ *
+ * Runs as a local stdio child of opencode (same pattern as knowledge-server)
+ * and shares the bot's SQLite DB via SESSIONS_DB_PATH. The scheduler tick in
+ * the main process picks changes up on its next pass — no IPC needed.
+ *
+ * Deliberately NOT exposed to the `job` agent: unattended runs must not
+ * create or edit jobs.
+ */
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import {
+  createJob, getJob, listJobs, updateJob, setJobEnabled,
+} from "../db/jobs.js";
+import { hasRole } from "../db/permissions.js";
+import { parseSchedulePhrase, looksLikeCron, nextCronRun, validateCron } from "../schedule-parse.js";
+
+const DEFAULT_TZ = process.env.JOBS_DEFAULT_TZ || "America/Chicago";
+
+const server = new McpServer({
+  name: "scheduler",
+  version: "1.0.0",
+});
+
+const PROMPT_GUIDANCE =
+  "IMPORTANT: the job runs later in a fresh session with NO memory of this conversation. " +
+  "Write the prompt fully self-contained: bake in every relevant detail discussed (data sources, " +
+  "queries, hosts, filters, formatting decisions, thresholds). Never write 'as discussed' or 'the thing we talked about'.";
+
+function text(t: string) {
+  return { content: [{ type: "text" as const, text: t }] };
+}
+
+/** Resolve "<when>" (plain English or cron) to a cron expression, or an error string. */
+function resolveWhen(when: string, timezone: string): { cron: string; description: string } | string {
+  if (looksLikeCron(when)) {
+    const err = validateCron(when, timezone);
+    return err ?? { cron: when, description: `\`${when}\`` };
+  }
+  const parsed = parseSchedulePhrase(when);
+  if (!parsed) {
+    return `Could not parse "${when}". Use phrases like "every weekday at 9am", "fridays at 8:30am", "every 15 minutes" — or a cron expression.`;
+  }
+  const err = validateCron(parsed.cron, timezone);
+  return err ?? parsed;
+}
+
+function requireDeveloper(userId: string): string | undefined {
+  if (!hasRole(userId, "developer")) {
+    return `User ${userId} lacks the developer role required to manage scheduled jobs. An admin can grant it with \`role add @them developer\`.`;
+  }
+  return undefined;
+}
+
+server.tool(
+  "create_scheduled_job",
+  "Create a recurring scheduled job (or watcher) that the bot runs unattended and posts to a Slack channel. " +
+    "Use when the user asks to do something on a schedule ('every Friday post...', 'check X every 15 minutes'). " +
+    "Watchers only post when something warrants attention; regular jobs post every run. " +
+    "New jobs start on probation: the first 3 results go to the creator's DM with approval buttons. " +
+    PROMPT_GUIDANCE,
+  {
+    name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/i).describe("Short kebab-case job name, e.g. 'error-trends'"),
+    when: z.string().describe("Schedule in plain English ('every weekday at 9am', 'every 15 minutes') or a cron expression"),
+    prompt: z.string().describe("Fully self-contained task instructions for the unattended run"),
+    kind: z.enum(["report", "watcher"]).describe("'report' posts every run; 'watcher' posts only when something warrants attention"),
+    channel_id: z.string().describe("Slack channel ID to post results to (from the conversation context; use the current channel unless the user names another)"),
+    created_by: z.string().describe("Slack user ID of the requesting user (from the conversation context)"),
+    timezone: z.string().optional().describe(`IANA timezone for the schedule (default ${DEFAULT_TZ})`),
+  },
+  async ({ name, when, prompt, kind, channel_id, created_by, timezone }) => {
+    console.error(`[scheduler-mcp] create_scheduled_job: ${name} "${when}" by ${created_by}`);
+    const denied = requireDeveloper(created_by);
+    if (denied) return text(denied);
+    if (getJob(name)) return text(`A job named "${name}" already exists — pick another name, or update it instead with update_scheduled_job.`);
+
+    const tz = timezone ?? DEFAULT_TZ;
+    const resolved = resolveWhen(when, tz);
+    if (typeof resolved === "string") return text(resolved);
+
+    const nextRunAt = nextCronRun(resolved.cron, tz);
+    if (!nextRunAt) return text("That schedule never fires.");
+
+    const job = createJob({
+      name,
+      kind: kind === "watcher" ? "watcher" : "cron",
+      cron: resolved.cron,
+      timezone: tz,
+      channelId: channel_id,
+      prompt,
+      createdBy: created_by,
+      nextRunAt,
+    });
+    return text(
+      `Created ${kind} "${job.name}" — ${resolved.description} (${tz}), posting to <#${channel_id}>. ` +
+      `Next run at epoch ${nextRunAt}. The first ${job.probation_remaining} results go to <@${created_by}>'s DM with approval buttons. ` +
+      `Tell the user this, including the schedule as you understood it.`,
+    );
+  },
+);
+
+server.tool(
+  "update_scheduled_job",
+  "Update an existing scheduled job's schedule, prompt, target channel, or kind. " +
+    "Use when the user asks to change a job conversationally ('make it Fridays instead', 'also include X in the report'). " +
+    "Any edit resets probation: the next 3 results go back to the owner's DM for approval. " +
+    "When editing the prompt, fetch the current one first with list_scheduled_jobs and produce the full replacement — edits are whole-prompt, not diffs. " +
+    PROMPT_GUIDANCE,
+  {
+    name: z.string().describe("Name of the existing job"),
+    requested_by: z.string().describe("Slack user ID of the requesting user (from the conversation context)"),
+    when: z.string().optional().describe("New schedule (plain English or cron)"),
+    prompt: z.string().optional().describe("Full replacement prompt (self-contained)"),
+    kind: z.enum(["report", "watcher"]).optional().describe("Change between report and watcher behavior"),
+    channel_id: z.string().optional().describe("New target channel ID"),
+    timezone: z.string().optional().describe("New IANA timezone"),
+    enabled: z.boolean().optional().describe("Pause (false) or resume (true) the job"),
+  },
+  async ({ name, requested_by, when, prompt, kind, channel_id, timezone, enabled }) => {
+    console.error(`[scheduler-mcp] update_scheduled_job: ${name} by ${requested_by}`);
+    const denied = requireDeveloper(requested_by);
+    if (denied) return text(denied);
+    const job = getJob(name);
+    if (!job) return text(`No job named "${name}". Use list_scheduled_jobs to see what exists.`);
+
+    const tz = timezone ?? job.timezone;
+    const fields: Parameters<typeof updateJob>[1] = {};
+    const changes: string[] = [];
+
+    if (when || timezone) {
+      const resolved = resolveWhen(when ?? job.cron ?? "", tz);
+      if (typeof resolved === "string") return text(resolved);
+      const nextRunAt = nextCronRun(resolved.cron, tz);
+      if (!nextRunAt) return text("That schedule never fires.");
+      fields.cron = resolved.cron;
+      fields.timezone = tz;
+      fields.nextRunAt = nextRunAt;
+      changes.push(`schedule → ${resolved.description} (${tz})`);
+    }
+    if (prompt) {
+      fields.prompt = prompt;
+      changes.push("prompt replaced");
+    }
+    if (kind) {
+      fields.kind = kind === "watcher" ? "watcher" : "cron";
+      changes.push(`kind → ${kind}`);
+    }
+    if (channel_id) {
+      fields.channelId = channel_id;
+      changes.push(`channel → <#${channel_id}>`);
+    }
+
+    if (Object.keys(fields).length > 0) updateJob(job.id, fields);
+    if (enabled !== undefined) {
+      const nextRunAt = enabled ? nextCronRun(fields.cron ?? job.cron ?? "", tz) : undefined;
+      setJobEnabled(job.id, enabled, nextRunAt ?? undefined);
+      changes.push(enabled ? "resumed" : "paused");
+    }
+    if (changes.length === 0) return text("Nothing to change — pass at least one field.");
+
+    const probationNote = Object.keys(fields).length > 0
+      ? " Probation reset: the next 3 results go to the owner's DM for approval."
+      : "";
+    return text(`Updated "${job.name}": ${changes.join("; ")}.${probationNote} Tell the user what changed.`);
+  },
+);
+
+server.tool(
+  "list_scheduled_jobs",
+  "List all scheduled jobs with their schedules, prompts, state, and last outcome. " +
+    "Use before updating a job (to fetch its current prompt) or when the user asks what's scheduled.",
+  {},
+  async () => {
+    const jobs = listJobs();
+    if (jobs.length === 0) return text("No scheduled jobs exist.");
+    const lines = jobs.map((j) => [
+      `name: ${j.name}`,
+      `kind: ${j.kind} | cron: ${j.cron} | tz: ${j.timezone} | enabled: ${!!j.enabled} | probation_left: ${j.probation_remaining}`,
+      `channel: ${j.channel_id} | owner: ${j.created_by} | last: ${j.last_status ?? "never ran"}`,
+      `prompt: ${j.prompt}`,
+    ].join("\n"));
+    return text(lines.join("\n\n---\n\n"));
+  },
+);
+
+async function main(): Promise<void> {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("[scheduler-mcp] ready");
+}
+
+main().catch((err) => {
+  console.error("[scheduler-mcp] fatal:", err);
+  process.exit(1);
+});

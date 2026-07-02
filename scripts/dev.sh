@@ -24,7 +24,9 @@ set +a
 : "${SESSIONS_DB_PATH:=$ROOT/.local/sessions.db}"
 : "${BASE_CONFIG_PATH:=$ROOT/opencode.json}"
 : "${TOOLS_SEED_PATH:=$ROOT/tools.json}"
-export REPO_DIR REPOS_BASE_DIR SESSIONS_DB_PATH BASE_CONFIG_PATH TOOLS_SEED_PATH
+# Built MCP servers (knowledge, scheduler) are spawned from dist — build first.
+: "${MCP_DIST_DIR:=$ROOT/dist}"
+export REPO_DIR REPOS_BASE_DIR SESSIONS_DB_PATH BASE_CONFIG_PATH TOOLS_SEED_PATH MCP_DIST_DIR
 
 mkdir -p "$(dirname "$SESSIONS_DB_PATH")" "$REPOS_BASE_DIR"
 
