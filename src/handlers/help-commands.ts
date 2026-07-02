@@ -82,7 +82,7 @@ const FAMILIES: Family[] = [
     key: "schedule",
     title: "Scheduled jobs",
     visibleTo: "anyone",
-    note: "`list` and `show` are open to all; everything else is developer-only.",
+    note: "Open to all: 5 active jobs per person, 15-minute minimum interval. You manage your own jobs; developers can manage anyone's.",
     blurb: "Recurring computed work — digests, analyses, watchers — posted to a channel. (Static reminders belong in Slack's `/remind`.)",
     lines: [
       "• `schedule add <name> \"<when>\" <prompt>` — posts every run",

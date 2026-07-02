@@ -18,6 +18,14 @@ export const Action = {
   JOB_PAUSE: "job_pause",
 } as const;
 
+// ── Scheduled-job limits (apply to everyone, including developers) ──
+
+/** Max enabled jobs per creator. */
+export const MAX_ACTIVE_JOBS_PER_USER = 5;
+
+/** No job may fire more often than this. */
+export const MIN_JOB_INTERVAL_MINUTES = 15;
+
 /** Maximum number of agent selection buttons (Slack allows 5 elements per actions block). */
 export const MAX_AGENT_BUTTONS = 5;
 

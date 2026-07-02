@@ -87,6 +87,13 @@ export function listJobs(): JobRow[] {
     .all() as JobRow[];
 }
 
+export function countActiveJobsByUser(userId: string): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM scheduled_jobs WHERE created_by = ? AND enabled = 1")
+    .get(userId) as { n: number };
+  return row.n;
+}
+
 export function getDueJobs(now: number): JobRow[] {
   return getDb()
     .prepare("SELECT * FROM scheduled_jobs WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at")

@@ -15,10 +15,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
-  createJob, getJob, listJobs, updateJob, setJobEnabled,
+  createJob, getJob, listJobs, updateJob, setJobEnabled, countActiveJobsByUser, type JobRow,
 } from "../db/jobs.js";
 import { hasRole } from "../db/permissions.js";
-import { parseSchedulePhrase, looksLikeCron, nextCronRun, validateCron } from "../schedule-parse.js";
+import { parseSchedulePhrase, looksLikeCron, nextCronRun, validateCron, validateMinInterval } from "../schedule-parse.js";
+import { MAX_ACTIVE_JOBS_PER_USER, MIN_JOB_INTERVAL_MINUTES } from "../constants.js";
 
 const DEFAULT_TZ = process.env.JOBS_DEFAULT_TZ || "America/Chicago";
 
@@ -38,21 +39,33 @@ function text(t: string) {
 
 /** Resolve "<when>" (plain English or cron) to a cron expression, or an error string. */
 function resolveWhen(when: string, timezone: string): { cron: string; description: string } | string {
+  let resolved: { cron: string; description: string };
   if (looksLikeCron(when)) {
     const err = validateCron(when, timezone);
-    return err ?? { cron: when, description: `\`${when}\`` };
+    if (err) return err;
+    resolved = { cron: when, description: `\`${when}\`` };
+  } else {
+    const parsed = parseSchedulePhrase(when);
+    if (!parsed) {
+      return `Could not parse "${when}". Use phrases like "every weekday at 9am", "fridays at 8:30am", "every 15 minutes" — or a cron expression.`;
+    }
+    const err = validateCron(parsed.cron, timezone);
+    if (err) return err;
+    resolved = parsed;
   }
-  const parsed = parseSchedulePhrase(when);
-  if (!parsed) {
-    return `Could not parse "${when}". Use phrases like "every weekday at 9am", "fridays at 8:30am", "every 15 minutes" — or a cron expression.`;
-  }
-  const err = validateCron(parsed.cron, timezone);
-  return err ?? parsed;
+  return validateMinInterval(resolved.cron, timezone, MIN_JOB_INTERVAL_MINUTES) ?? resolved;
 }
 
-function requireDeveloper(userId: string): string | undefined {
-  if (!hasRole(userId, "developer")) {
-    return `User ${userId} lacks the developer role required to manage scheduled jobs. An admin can grant it with \`role add @them developer\`.`;
+/** Anyone can manage their own jobs; developers can manage anyone's. */
+function requireOwnerOrDev(job: JobRow, userId: string): string | undefined {
+  if (job.created_by === userId || hasRole(userId, "developer")) return undefined;
+  return `Job "${job.name}" belongs to <@${job.created_by}> — only they (or a developer) can change it. Tell the user this.`;
+}
+
+/** Per-person active-job cap (applies to everyone). */
+function checkJobCap(userId: string): string | undefined {
+  if (countActiveJobsByUser(userId) >= MAX_ACTIVE_JOBS_PER_USER) {
+    return `<@${userId}> already has ${MAX_ACTIVE_JOBS_PER_USER} active jobs (the per-person limit). They must pause or delete one first — suggest reviewing with list_scheduled_jobs.`;
   }
   return undefined;
 }
@@ -75,8 +88,8 @@ server.tool(
   },
   async ({ name, when, prompt, kind, channel_id, created_by, timezone }) => {
     console.error(`[scheduler-mcp] create_scheduled_job: ${name} "${when}" by ${created_by}`);
-    const denied = requireDeveloper(created_by);
-    if (denied) return text(denied);
+    const capped = checkJobCap(created_by);
+    if (capped) return text(capped);
     if (getJob(name)) return text(`A job named "${name}" already exists — pick another name, or update it instead with update_scheduled_job.`);
 
     const tz = timezone ?? DEFAULT_TZ;
@@ -123,10 +136,10 @@ server.tool(
   },
   async ({ name, requested_by, when, prompt, kind, channel_id, timezone, enabled }) => {
     console.error(`[scheduler-mcp] update_scheduled_job: ${name} by ${requested_by}`);
-    const denied = requireDeveloper(requested_by);
-    if (denied) return text(denied);
     const job = getJob(name);
     if (!job) return text(`No job named "${name}". Use list_scheduled_jobs to see what exists.`);
+    const denied = requireOwnerOrDev(job, requested_by);
+    if (denied) return text(denied);
 
     const tz = timezone ?? job.timezone;
     const fields: Parameters<typeof updateJob>[1] = {};
@@ -157,6 +170,10 @@ server.tool(
 
     if (Object.keys(fields).length > 0) updateJob(job.id, fields);
     if (enabled !== undefined) {
+      if (enabled && !job.enabled) {
+        const capped = checkJobCap(job.created_by);
+        if (capped) return text(capped);
+      }
       const nextRunAt = enabled ? nextCronRun(fields.cron ?? job.cron ?? "", tz) : undefined;
       setJobEnabled(job.id, enabled, nextRunAt ?? undefined);
       changes.push(enabled ? "resumed" : "paused");

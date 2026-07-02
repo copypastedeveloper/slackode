@@ -1,10 +1,11 @@
 import type { WebClient } from "@slack/web-api";
 import { hasRole } from "../sessions.js";
 import {
-  createJob, getJob, listJobs, deleteJob, setJobEnabled,
+  createJob, getJob, listJobs, deleteJob, setJobEnabled, countActiveJobsByUser,
   decrementProbation, getRecentRuns, getJobCost, type JobRow,
 } from "../db/jobs.js";
-import { parseSchedulePhrase, looksLikeCron, nextCronRun, validateCron } from "../schedule-parse.js";
+import { parseSchedulePhrase, looksLikeCron, nextCronRun, validateCron, validateMinInterval } from "../schedule-parse.js";
+import { MAX_ACTIVE_JOBS_PER_USER, MIN_JOB_INTERVAL_MINUTES } from "../constants.js";
 import { runJob } from "../job-runner.js";
 
 const DEFAULT_TZ = process.env.JOBS_DEFAULT_TZ || "America/Chicago";
@@ -22,6 +23,7 @@ const HELP = [
   "• `schedule pause <name>` / `schedule resume <name>` / `schedule delete <name>`",
   "",
   "New jobs run on probation: the first 3 results come to your DM with *Post to channel / Needs work / Pause job* buttons instead of posting publicly.",
+  `Limits: ${MAX_ACTIVE_JOBS_PER_USER} active jobs per person, nothing more frequent than every ${MIN_JOB_INTERVAL_MINUTES} minutes. You manage your own jobs; developers can manage anyone's.`,
 ].join("\n");
 
 /**
@@ -49,27 +51,34 @@ export async function handleScheduleCommand(
     case "show":
       return renderShow(args);
     case "add":
-      return requireDev(userId) ?? handleAdd(args, channelId, userId, "cron");
+      return handleAdd(args, channelId, userId, "cron");
     case "watch":
-      return requireDev(userId) ?? handleAdd(args, channelId, userId, "watcher");
+      return handleAdd(args, channelId, userId, "watcher");
     case "pause":
-      return requireDev(userId) ?? toggle(args, false);
+      return toggle(args, false, userId);
     case "resume":
-      return requireDev(userId) ?? toggle(args, true);
+      return toggle(args, true, userId);
     case "delete":
-      return requireDev(userId) ?? handleDelete(args);
+      return handleDelete(args, userId);
     case "approve":
-      return requireDev(userId) ?? handleApprove(args);
+      return handleApprove(args, userId);
     case "run":
-      return requireDev(userId) ?? handleRun(args, client);
+      return handleRun(args, client, userId);
     default:
       return HELP;
   }
 }
 
-function requireDev(userId: string): string | undefined {
-  if (!hasRole(userId, "developer")) {
-    return "This command requires *developer* permissions. Ask an admin to run `role add @you developer`.";
+/** Anyone can manage their own jobs; developers can manage anyone's. */
+function requireOwnerOrDev(job: JobRow, userId: string): string | undefined {
+  if (job.created_by === userId || hasRole(userId, "developer")) return undefined;
+  return `\`${job.name}\` belongs to <@${job.created_by}> — only they (or a developer) can manage it.`;
+}
+
+/** Enforce the per-person active-job cap; `exclude` skips the job being resumed. */
+function checkJobCap(userId: string): string | undefined {
+  if (countActiveJobsByUser(userId) >= MAX_ACTIVE_JOBS_PER_USER) {
+    return `You already have ${MAX_ACTIVE_JOBS_PER_USER} active jobs (the per-person limit). Pause or delete one first — \`schedule list\` to review.`;
   }
   return undefined;
 }
@@ -107,6 +116,9 @@ function handleAdd(args: string, channelId: string, userId: string, kind: "cron"
   }
   if (!prompt) return "The job needs a prompt describing what to do.";
 
+  const capError = checkJobCap(userId);
+  if (capError) return capError;
+
   // "<when>" accepts plain English or a raw cron expression.
   let cron: string;
   let whenDesc: string;
@@ -126,6 +138,9 @@ function handleAdd(args: string, channelId: string, userId: string, kind: "cron"
     whenDesc = `${parsed.description} (\`${cron}\`)`;
   }
 
+  const intervalError = validateMinInterval(cron, timezone, MIN_JOB_INTERVAL_MINUTES);
+  if (intervalError) return intervalError;
+
   const nextRunAt = nextCronRun(cron, timezone);
   if (!nextRunAt) return "That schedule never fires.";
 
@@ -143,11 +158,16 @@ function handleAdd(args: string, channelId: string, userId: string, kind: "cron"
   ].join("\n");
 }
 
-function toggle(name: string, enabled: boolean): string {
+function toggle(name: string, enabled: boolean, userId: string): string {
   const job = getJob(name.trim());
   if (!job) return unknownJob(name);
+  const denied = requireOwnerOrDev(job, userId);
+  if (denied) return denied;
   if (enabled) {
-    if (job.kind !== "cron" || !job.cron) return `\`${job.name}\` is a ${job.kind} job and can't be resumed.`;
+    if (job.kind === "oneshot") return `\`${job.name}\` is a one-time job and can't be resumed.`;
+    if (!job.cron) return `\`${job.name}\` has no schedule to resume.`;
+    const capError = checkJobCap(job.created_by);
+    if (capError) return capError;
     const nextRunAt = nextCronRun(job.cron, job.timezone);
     setJobEnabled(job.id, true, nextRunAt);
     return `:arrow_forward: Resumed \`${job.name}\` — next run ${nextRunAt ? fmtTime(nextRunAt) : "never"}.`;
@@ -156,16 +176,20 @@ function toggle(name: string, enabled: boolean): string {
   return `:double_vertical_bar: Paused \`${job.name}\`. \`schedule resume ${job.name}\` to re-enable.`;
 }
 
-function handleDelete(name: string): string {
+function handleDelete(name: string, userId: string): string {
   const job = getJob(name.trim());
   if (!job) return unknownJob(name);
+  const denied = requireOwnerOrDev(job, userId);
+  if (denied) return denied;
   deleteJob(job.id);
   return `:wastebasket: Deleted \`${job.name}\` and its run history.`;
 }
 
-function handleApprove(name: string): string {
+function handleApprove(name: string, userId: string): string {
   const job = getJob(name.trim());
   if (!job) return unknownJob(name);
+  const denied = requireOwnerOrDev(job, userId);
+  if (denied) return denied;
   if (job.probation_remaining <= 0) return `\`${job.name}\` is already out of probation.`;
   decrementProbation(job.id);
   const left = job.probation_remaining - 1;
@@ -174,9 +198,11 @@ function handleApprove(name: string): string {
     : `:white_check_mark: Approved — \`${job.name}\` is out of probation and will post directly to <#${job.channel_id}>.`;
 }
 
-function handleRun(name: string, client: WebClient): string {
+function handleRun(name: string, client: WebClient, userId: string): string {
   const job = getJob(name.trim());
   if (!job) return unknownJob(name);
+  const denied = requireOwnerOrDev(job, userId);
+  if (denied) return denied;
   // Fire and forget — the runner reports its own outcome (post or failure DM).
   runJob(job, client, { manual: true }).catch((err) =>
     console.error(`[jobs] manual run of ${job.name} failed:`, err),

@@ -36,6 +36,26 @@ export function validateCron(expression: string, timezone: string): string | und
   }
 }
 
+/**
+ * Reject schedules that fire more often than `minMinutes` apart. Samples the
+ * next several fire times and checks the smallest consecutive gap, so it
+ * handles irregular expressions (e.g. "0,10 * * * *"), not just step syntax.
+ */
+export function validateMinInterval(expression: string, timezone: string, minMinutes: number): string | undefined {
+  try {
+    const runs = new Cron(expression, { timezone }).nextRuns(6);
+    for (let i = 1; i < runs.length; i++) {
+      const gapMinutes = (runs[i].getTime() - runs[i - 1].getTime()) / 60_000;
+      if (gapMinutes < minMinutes) {
+        return `That schedule fires every ${Math.round(gapMinutes)} minutes — the minimum interval is ${minMinutes} minutes.`;
+      }
+    }
+    return undefined;
+  } catch {
+    return undefined; // validateCron reports parse errors; don't double-report.
+  }
+}
+
 const DAYS: Record<string, number> = {
   sun: 0, sunday: 0,
   mon: 1, monday: 1,
