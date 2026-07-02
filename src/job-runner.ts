@@ -71,6 +71,30 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
       finishRun(runId, "quiet", { snapshotJson });
       recordJobOutcome(job.id, "quiet");
       console.log(`[jobs] run ${runId} quiet: ${job.name}`);
+      // During review, a quiet run would leave the owner waiting on a DM that
+      // never comes — surface it with the same approval buttons.
+      if (job.probation_remaining > 0 && !opts.manual) {
+        const dm = await openOwnerDm(client, job.created_by);
+        await client.chat.postMessage({
+          channel: dm,
+          text: `:eyes: Review run of watcher \`${job.name}\` completed *quietly* — nothing warranted attention (that's its normal behavior). Approve it to start watching for real, or tell me what to change.${snapshotJson ? `\nWhat it observed: \`${snapshotJson.slice(0, 300)}\`` : ""}`,
+          blocks: undefined,
+        });
+        await client.chat.postMessage({
+          channel: dm,
+          text: `Approve watcher \`${job.name}\`?`,
+          blocks: [
+            {
+              type: "actions",
+              elements: [
+                { type: "button", style: "primary", text: { type: "plain_text", text: "Approve & watch" }, action_id: Action.JOB_POST, value: runId },
+                { type: "button", text: { type: "plain_text", text: "Needs work" }, action_id: Action.JOB_NEEDS_WORK, value: runId },
+                { type: "button", style: "danger", text: { type: "plain_text", text: "Pause job" }, action_id: Action.JOB_PAUSE, value: runId },
+              ],
+            },
+          ],
+        });
+      }
       return { status: "quiet" };
     }
     if (!post.trim()) {
@@ -86,8 +110,7 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
       const header = await client.chat.postMessage({
         channel: target,
         text:
-          `:test_tube: *Probation run for \`${job.name}\`* (${job.probation_remaining} approval${job.probation_remaining === 1 ? "" : "s"} left) — ` +
-          `this would have been posted to <#${job.channel_id}>.`,
+          `:eyes: *Here's a run of \`${job.name}\` for your review* — once you approve, it posts to <#${job.channel_id}> on its schedule (${job.cron ?? "one-time"}).`,
       });
       parentTs = header.ts;
     }
@@ -110,12 +133,12 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
     if (probation) {
       await client.chat.postMessage({
         channel: target,
-        text: `Approve this run of \`${job.name}\`?`,
+        text: `Approve this run of \`${job.name}\`, or tell me what to change?`,
         blocks: [
           {
             type: "actions",
             elements: [
-              { type: "button", style: "primary", text: { type: "plain_text", text: `Post to channel` }, action_id: Action.JOB_POST, value: runId },
+              { type: "button", style: "primary", text: { type: "plain_text", text: "Approve & post" }, action_id: Action.JOB_POST, value: runId },
               { type: "button", text: { type: "plain_text", text: "Needs work" }, action_id: Action.JOB_NEEDS_WORK, value: runId },
               { type: "button", style: "danger", text: { type: "plain_text", text: "Pause job" }, action_id: Action.JOB_PAUSE, value: runId },
             ],
@@ -242,12 +265,17 @@ function extractFileIds(res: unknown): string[] {
 
 // ── Probation button actions ──
 
-/** [Post to channel]: forward the stored run content to the job's channel and count the approval. */
+/** [Approve & post]: forward the stored run content to the job's channel and count the approval. */
 export async function approveProbationRun(runId: string, client: WebClient): Promise<string> {
   const run = getRun(runId);
   const job = run && getJobById(run.job_id);
   if (!run || !job) return "That run no longer exists.";
-  if (!run.post_markdown) return "This run has no stored content to post (it predates button approvals).";
+
+  // Quiet watcher review runs have nothing to forward — approval just counts.
+  if (!run.post_markdown) {
+    decrementProbation(job.id);
+    return `:white_check_mark: Approved — \`${job.name}\` is live and will post to <#${job.channel_id}> whenever something warrants attention.`;
+  }
 
   const parentTs = await postFormatted(client, job.channel_id, run.post_markdown, job.thread_ts ?? undefined);
 
@@ -275,16 +303,20 @@ export async function approveProbationRun(runId: string, client: WebClient): Pro
   decrementProbation(job.id);
   const left = Math.max(job.probation_remaining - 1, 0);
   return left > 0
-    ? `:white_check_mark: Posted to <#${job.channel_id}>. ${left} probation approval${left === 1 ? "" : "s"} left for \`${job.name}\`.`
-    : `:white_check_mark: Posted to <#${job.channel_id}> — \`${job.name}\` is out of probation and will post there directly from now on.`;
+    ? `:white_check_mark: Posted to <#${job.channel_id}>. ${left} review${left === 1 ? "" : "s"} left before \`${job.name}\` goes fully live.`
+    : `:white_check_mark: Posted to <#${job.channel_id}> — \`${job.name}\` is approved and will post there directly on its schedule from now on.`;
 }
 
-/** [Needs work]: no approval counted; the owner should adjust the job prompt. */
+/** [Needs work]: seed a conversational edit — the user replies in-thread and the agent updates the job. */
 export function rejectProbationRun(runId: string): string {
   const run = getRun(runId);
   const job = run && getJobById(run.job_id);
   if (!run || !job) return "That run no longer exists.";
-  return `:pencil2: Noted — this run did not count toward probation. Adjust the prompt with \`schedule delete ${job.name}\` + a new \`schedule add\`, and the next run will reflect it.`;
+  return (
+    `:pencil2: *What should change about \`${job.name}\`?*\n` +
+    `Reply *in this thread* describing the changes — schedule, content, formatting, target channel, anything — ` +
+    `and I'll update the job and send you a fresh run to review.`
+  );
 }
 
 /** [Pause job]: stop future runs. */

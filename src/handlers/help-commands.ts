@@ -91,7 +91,7 @@ const FAMILIES: Family[] = [
       "• `schedule list` / `schedule show <name>`",
       "• `schedule run <name>` — fire it now",
       "• `schedule pause|resume|delete <name>`",
-      "• New jobs are on probation: the first results arrive in your DM with approval buttons",
+      "• Creating a job runs it immediately — the result arrives in your DM for approval before it goes live",
     ],
   },
   {

@@ -26,6 +26,13 @@ export const MAX_ACTIVE_JOBS_PER_USER = 5;
 /** No job may fire more often than this. */
 export const MIN_JOB_INTERVAL_MINUTES = 15;
 
+/**
+ * Review runs before a job posts publicly. Creation (and any edit) triggers an
+ * immediate run delivered to the owner's DM with approve/modify buttons; one
+ * approval takes the job live.
+ */
+export const PROBATION_RUNS = 1;
+
 /** Maximum number of agent selection buttons (Slack allows 5 elements per actions block). */
 export const MAX_AGENT_BUTTONS = 5;
 

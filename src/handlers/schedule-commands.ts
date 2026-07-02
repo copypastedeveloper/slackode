@@ -22,7 +22,7 @@ const HELP = [
   "• `schedule run <name>` — fire it now",
   "• `schedule pause <name>` / `schedule resume <name>` / `schedule delete <name>`",
   "",
-  "New jobs run on probation: the first 3 results come to your DM with *Post to channel / Needs work / Pause job* buttons instead of posting publicly.",
+  "Creating a job runs it immediately: the result comes to your DM with *Approve & post / Needs work / Pause job* buttons, and the job goes live once you approve. *Needs work* starts a thread where you describe changes conversationally.",
   `Limits: ${MAX_ACTIVE_JOBS_PER_USER} active jobs per person, nothing more frequent than every ${MIN_JOB_INTERVAL_MINUTES} minutes. You manage your own jobs; developers can manage anyone's.`,
 ].join("\n");
 
@@ -141,12 +141,14 @@ function handleAdd(args: string, channelId: string, userId: string, kind: "cron"
   const intervalError = validateMinInterval(cron, timezone, MIN_JOB_INTERVAL_MINUTES);
   if (intervalError) return intervalError;
 
-  const nextRunAt = nextCronRun(cron, timezone);
-  if (!nextRunAt) return "That schedule never fires.";
+  if (!nextCronRun(cron, timezone)) return "That schedule never fires.";
 
+  // Fire immediately: the review run lands in the owner's DM, then the
+  // schedule takes over at its natural next slot.
   const job = createJob({
     name, kind, cron, timezone,
-    channelId: targetChannel, prompt, createdBy: userId, nextRunAt,
+    channelId: targetChannel, prompt, createdBy: userId,
+    nextRunAt: Math.floor(Date.now() / 1000) - 1,
   });
 
   const watcherNote = kind === "watcher"
@@ -154,7 +156,7 @@ function handleAdd(args: string, channelId: string, userId: string, kind: "cron"
     : "";
   return [
     `:calendar: Created ${kind === "watcher" ? "watcher" : "job"} \`${job.name}\` — ${whenDesc} (${timezone}), posting to <#${targetChannel}>.${watcherNote}`,
-    `Next run: ${fmtTime(nextRunAt)}. The first ${job.probation_remaining} results come to your DM with approval buttons before anything posts publicly.`,
+    `Running it now — the result lands in your DM within a minute for review. Approve it there and the job goes live.`,
   ].join("\n");
 }
 

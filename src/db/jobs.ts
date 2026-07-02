@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./index.js";
+import { PROBATION_RUNS } from "../constants.js";
 
 export type JobKind = "cron" | "oneshot" | "watcher";
 // "quiet" = a watcher ran, found nothing worth posting, and stayed silent.
@@ -58,13 +59,14 @@ export function createJob(opts: CreateJobOpts): JobRow {
   const id = randomUUID();
   getDb()
     .prepare(`
-      INSERT INTO scheduled_jobs (id, name, kind, cron, timezone, run_at, channel_id, thread_ts, prompt, created_by, next_run_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO scheduled_jobs (id, name, kind, cron, timezone, run_at, channel_id, thread_ts, prompt, created_by, next_run_at, probation_remaining)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       id, opts.name, opts.kind, opts.cron ?? null,
       opts.timezone ?? "America/Chicago", opts.runAt ?? null,
       opts.channelId, opts.threadTs ?? null, opts.prompt, opts.createdBy, opts.nextRunAt,
+      PROBATION_RUNS,
     );
   return getJob(opts.name)!;
 }
@@ -145,7 +147,7 @@ export function updateJob(id: string, fields: UpdateJobFields): void {
     }
   }
   if (sets.length === 0) return;
-  sets.push("probation_remaining = 3", "updated_at = unixepoch()");
+  sets.push(`probation_remaining = ${PROBATION_RUNS}`, "updated_at = unixepoch()");
   getDb()
     .prepare(`UPDATE scheduled_jobs SET ${sets.join(", ")} WHERE id = ?`)
     .run(...values, id);

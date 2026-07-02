@@ -75,7 +75,7 @@ server.tool(
   "Create a recurring scheduled job (or watcher) that the bot runs unattended and posts to a Slack channel. " +
     "Use when the user asks to do something on a schedule ('every Friday post...', 'check X every 15 minutes'). " +
     "Watchers only post when something warrants attention; regular jobs post every run. " +
-    "New jobs start on probation: the first 3 results go to the creator's DM with approval buttons. " +
+    "Creation triggers an immediate review run: the result goes to the creator's DM with Approve/Needs-work buttons, and the job goes live once approved. " +
     PROMPT_GUIDANCE,
   {
     name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/i).describe("Short kebab-case job name, e.g. 'error-trends'"),
@@ -96,9 +96,10 @@ server.tool(
     const resolved = resolveWhen(when, tz);
     if (typeof resolved === "string") return text(resolved);
 
-    const nextRunAt = nextCronRun(resolved.cron, tz);
-    if (!nextRunAt) return text("That schedule never fires.");
+    if (!nextCronRun(resolved.cron, tz)) return text("That schedule never fires.");
 
+    // Fire immediately: the review run lands in the owner's DM, then the
+    // schedule takes over at its natural next slot.
     const job = createJob({
       name,
       kind: kind === "watcher" ? "watcher" : "cron",
@@ -107,11 +108,11 @@ server.tool(
       channelId: channel_id,
       prompt,
       createdBy: created_by,
-      nextRunAt,
+      nextRunAt: Math.floor(Date.now() / 1000) - 1,
     });
     return text(
       `Created ${kind} "${job.name}" — ${resolved.description} (${tz}), posting to <#${channel_id}>. ` +
-      `Next run at epoch ${nextRunAt}. The first ${job.probation_remaining} results go to <@${created_by}>'s DM with approval buttons. ` +
+      `A review run starts now: the result reaches <@${created_by}>'s DM within a minute with Approve/Needs-work buttons, and the job goes live once approved. ` +
       `Tell the user this, including the schedule as you understood it.`,
     );
   },
@@ -121,7 +122,7 @@ server.tool(
   "update_scheduled_job",
   "Update an existing scheduled job's schedule, prompt, target channel, or kind. " +
     "Use when the user asks to change a job conversationally ('make it Fridays instead', 'also include X in the report'). " +
-    "Any edit resets probation: the next 3 results go back to the owner's DM for approval. " +
+    "Any edit triggers a fresh review run: the result goes to the owner's DM for approval before the job posts publicly again. " +
     "When editing the prompt, fetch the current one first with list_scheduled_jobs and produce the full replacement — edits are whole-prompt, not diffs. " +
     PROMPT_GUIDANCE,
   {
@@ -148,11 +149,9 @@ server.tool(
     if (when || timezone) {
       const resolved = resolveWhen(when ?? job.cron ?? "", tz);
       if (typeof resolved === "string") return text(resolved);
-      const nextRunAt = nextCronRun(resolved.cron, tz);
-      if (!nextRunAt) return text("That schedule never fires.");
+      if (!nextCronRun(resolved.cron, tz)) return text("That schedule never fires.");
       fields.cron = resolved.cron;
       fields.timezone = tz;
-      fields.nextRunAt = nextRunAt;
       changes.push(`schedule → ${resolved.description} (${tz})`);
     }
     if (prompt) {
@@ -168,7 +167,12 @@ server.tool(
       changes.push(`channel → <#${channel_id}>`);
     }
 
-    if (Object.keys(fields).length > 0) updateJob(job.id, fields);
+    if (Object.keys(fields).length > 0) {
+      // Behavior changed — trigger an immediate review run (probation resets in
+      // updateJob, so the result goes to the owner's DM, not the channel).
+      fields.nextRunAt = Math.floor(Date.now() / 1000) - 1;
+      updateJob(job.id, fields);
+    }
     if (enabled !== undefined) {
       if (enabled && !job.enabled) {
         const capped = checkJobCap(job.created_by);
@@ -180,10 +184,10 @@ server.tool(
     }
     if (changes.length === 0) return text("Nothing to change — pass at least one field.");
 
-    const probationNote = Object.keys(fields).length > 0
-      ? " Probation reset: the next 3 results go to the owner's DM for approval."
+    const reviewNote = Object.keys(fields).length > 0
+      ? " A fresh review run starts now — the result reaches the owner's DM within a minute for approval before anything posts publicly."
       : "";
-    return text(`Updated "${job.name}": ${changes.join("; ")}.${probationNote} Tell the user what changed.`);
+    return text(`Updated "${job.name}": ${changes.join("; ")}.${reviewNote} Tell the user what changed.`);
   },
 );
 
