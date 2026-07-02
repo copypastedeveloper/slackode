@@ -117,17 +117,32 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
 
     parentTs = await postFormatted(client, target, post, probation ? parentTs : threadTs) ?? parentTs;
 
+    // Uploads are best-effort: a missing file or Slack scope must not kill the
+    // run — the text content already posted, and the review buttons must follow.
     const uploadFileIds: string[] = [];
+    let uploadFailures = 0;
     for (const filePath of uploads) {
       if (!existsSync(filePath)) {
         console.warn(`[jobs] ${job.name}: upload path does not exist, skipping: ${filePath}`);
         continue;
       }
       const filename = filePath.split("/").pop() ?? "upload";
-      const res = parentTs
-        ? await client.files.uploadV2({ channel_id: target, thread_ts: parentTs, file: filePath, filename })
-        : await client.files.uploadV2({ channel_id: target, file: filePath, filename });
-      uploadFileIds.push(...extractFileIds(res));
+      try {
+        const res = parentTs
+          ? await client.files.uploadV2({ channel_id: target, thread_ts: parentTs, file: filePath, filename })
+          : await client.files.uploadV2({ channel_id: target, file: filePath, filename });
+        uploadFileIds.push(...extractFileIds(res));
+      } catch (err) {
+        uploadFailures++;
+        console.error(`[jobs] ${job.name}: upload failed for ${filename}:`, err);
+      }
+    }
+    if (uploadFailures > 0) {
+      await client.chat.postMessage({
+        channel: target,
+        ...(parentTs ? { thread_ts: parentTs } : {}),
+        text: `:warning: ${uploadFailures} attachment${uploadFailures === 1 ? "" : "s"} could not be uploaded (check the bot's \`files:write\` scope).`,
+      }).catch(() => {});
     }
 
     if (probation) {
@@ -180,12 +195,12 @@ function buildRunPrompt(job: JobRow, scratchDir: string, prevSnapshot?: string):
       : "This is the first run; there is no previous snapshot.",
     `Task:\n${job.prompt}`,
     [
-      "Structure your final response exactly as:",
+      "Your final response IS the Slack post — it is forwarded verbatim, so do not wrap it in any label, heading, or preamble (never write 'Slack message to post:' or similar; the first line of your response is the first line people see in Slack).",
       watcher
-        ? "1. If (and only if) something warrants attention, the Slack message to post (markdown). If nothing does, the single word NO_POST instead — silence is the expected outcome most runs."
-        : "1. The Slack message to post (markdown).",
-      `2. ${watcher ? "Always include a" : "Optionally, a"} fenced block tagged \`snapshot\` containing compact JSON summarizing what you observed this run (used for comparison next run${watcher ? ", including on NO_POST runs — it is how you avoid re-raising the same finding" : ""}).`,
-      "3. Optionally, a fenced block tagged `uploads` listing absolute paths of files to upload, one per line.",
+        ? "If (and only if) something warrants attention, respond with the message to post (markdown). If nothing does, respond with the single word NO_POST instead — silence is the expected outcome most runs."
+        : "Respond with the message to post (markdown).",
+      `After the message, ${watcher ? "always include" : "optionally include"} a fenced block tagged \`snapshot\` containing compact JSON summarizing what you observed this run (used for comparison next run${watcher ? ", including on NO_POST runs — it is how you avoid re-raising the same finding" : ""}).`,
+      "Optionally, a fenced block tagged `uploads` listing absolute paths of files to upload, one per line — only files that add value beyond the message itself (charts, images, data extracts). Never attach a copy of the message text or the snapshot.",
     ].join("\n"),
   ].join("\n\n");
 }
@@ -217,7 +232,10 @@ export function parseRunOutput(text: string): { post: string; snapshotJson?: str
     post = post.replace(uploadsMatch[0], "");
   }
 
-  const trimmed = post.trim();
+  // Strip a leading contract-artifact label line ("Slack message to post:",
+  // "Message:", etc.) — models occasionally echo the response structure.
+  let trimmed = post.trim().replace(/^(?:\*\*|__)?(?:the )?(?:slack )?(?:message|post)(?: to post)?:?(?:\*\*|__)?\s*:?\s*\n+/i, "");
+  trimmed = trimmed.trim();
   // Tolerate markdown wrapping (**NO_POST**, `NO_POST`) — stripping those chars
   // also strips the underscore, hence NO_?POST.
   const noPost = /^NO_?POST\.?$/i.test(trimmed.replace(/[*_`]/g, "").trim());
