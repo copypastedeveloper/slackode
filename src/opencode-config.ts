@@ -25,6 +25,14 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
   const model = process.env.MODEL ?? "claude-sonnet-4.6";
   config.model = `${provider}/${model}`;
 
+  // Scheduled jobs can run on a cheaper model (e.g. a Haiku-class one) —
+  // high-frequency watchers don't need the flagship. Unset = inherit config.model.
+  const jobsModel = process.env.JOBS_MODEL;
+  if (jobsModel && config.agent?.job) {
+    config.agent.job.model = jobsModel.includes("/") ? jobsModel : `${provider}/${jobsModel}`;
+    console.log(`[config] job agent model: ${config.agent.job.model}`);
+  }
+
   // Disable opencode's git snapshot feature. Snapshots track file edits, but this is a
   // read-only Q&A/agent that never edits the repo — so they're pure overhead. Worse, the
   // snapshot git ops race slackode's background repo-sync (git pull) in the same checkout,

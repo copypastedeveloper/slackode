@@ -13,6 +13,9 @@ export const Action = {
   SELECT_REPO_PREFIX: "select_repo_",
   GITHUB_CONNECT: "github_connect",
   OAUTH_COMPLETE: "oauth_complete",
+  JOB_POST: "job_post",
+  JOB_NEEDS_WORK: "job_needs_work",
+  JOB_PAUSE: "job_pause",
 } as const;
 
 /** Maximum number of agent selection buttons (Slack allows 5 elements per actions block). */

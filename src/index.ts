@@ -10,6 +10,8 @@ import {
 } from "./coding-session.js";
 import { startPeriodicTokenRefresh, stopPeriodicTokenRefresh } from "./mcp/oauth-refresh.js";
 import { startPeriodicGDocsSync, stopPeriodicGDocsSync } from "./gdocs-sync.js";
+import { startScheduler, stopScheduler } from "./scheduler.js";
+import { approveProbationRun, rejectProbationRun, pauseJobFromRun } from "./job-runner.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
@@ -85,6 +87,27 @@ app.action(Action.CODING_DONE, async ({ action, ack, body, client }) => {
   const reply = await handlePR(threadTs, body.user.id, undefined, true);
   await client.chat.postMessage({ channel, thread_ts: threadTs, text: reply });
 });
+
+// Scheduled-job probation buttons. These live in the job owner's DM, so the
+// clicker is the owner by construction; we replace the button message with the
+// outcome so a decision can't be applied twice.
+function registerProbationAction(actionId: string, handle: (runId: string) => Promise<string> | string): void {
+  app.action(actionId, async ({ action, ack, body, client }) => {
+    await ack();
+    const runId = (action as { value: string }).value;
+    const channel = (body as { channel?: { id: string } }).channel?.id;
+    const messageTs = (body as { message?: { ts: string } }).message?.ts;
+    const outcome = await handle(runId);
+    if (channel && messageTs) {
+      await client.chat.update({ channel, ts: messageTs, text: outcome, blocks: [] });
+    } else if (channel) {
+      await client.chat.postMessage({ channel, text: outcome });
+    }
+  });
+}
+registerProbationAction(Action.JOB_POST, (runId) => approveProbationRun(runId, app.client));
+registerProbationAction(Action.JOB_NEEDS_WORK, rejectProbationRun);
+registerProbationAction(Action.JOB_PAUSE, pauseJobFromRun);
 
 // Repo selection buttons (select_repo_0 through select_repo_N)
 for (let i = 0; i < MAX_REPO_BUTTONS; i++) {
@@ -342,6 +365,9 @@ async function start(): Promise<void> {
   // 8. Start coding session idle reaper (every 5 min)
   const reaperInterval = startSessionReaper();
 
+  // 9. Start the scheduled-jobs tick (needs app.client for posting)
+  startScheduler(app.client);
+
   // Generate context files after a delay so startup Q&A isn't rate-limited
   const CONTEXT_GEN_STARTUP_DELAY_MS = 5 * 60 * 1000; // 5 minutes
   setTimeout(() => {
@@ -360,6 +386,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   shuttingDown = true;
   console.log(`[shutdown] start (signal=${signal})`);
+  try { stopScheduler(); } catch (e) { console.warn("[shutdown] stopScheduler:", e); }
   try { stopPeriodicTokenRefresh(); } catch (e) { console.warn("[shutdown] stopPeriodicTokenRefresh:", e); }
   try { stopPeriodicGDocsSync(); } catch (e) { console.warn("[shutdown] stopPeriodicGDocsSync:", e); }
   try { await destroyAllCodingSessions(); } catch (e) { console.warn("[shutdown] destroyAllCodingSessions:", e); }

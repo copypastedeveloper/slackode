@@ -163,6 +163,35 @@
         "task": { "*": "deny" }
       }
     },
+    "job": {
+      "description": "Unattended scheduled-job runner. Executes committed recipes and scripts; cannot modify code and never asks questions.",
+      "tools": {
+        "bash": true,
+        "read": true,
+        "grep": true,
+        "glob": true,
+        "list": true,
+        "write": false,
+        "edit": false,
+        "patch": false,
+        "skill": false,
+        "todowrite": false,
+        "todoread": false,
+        "webfetch": false,
+        "websearch": false,
+        "question": false
+      },
+      "permission": {
+        "edit": "deny",
+        "bash": { "*": "allow" },
+        "skill": { "*": "deny" },
+        "task": { "*": "deny" },
+        "external_directory": {
+          "/app/repos/*": "allow",
+          "/tmp/*": "allow"
+        }
+      }
+    },
     "plan": {
       "disable": true
     },

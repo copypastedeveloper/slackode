@@ -79,6 +79,22 @@ const FAMILIES: Family[] = [
     ],
   },
   {
+    key: "schedule",
+    title: "Scheduled jobs",
+    visibleTo: "anyone",
+    note: "`list` and `show` are open to all; everything else is developer-only.",
+    blurb: "Recurring computed work — digests, analyses, watchers — posted to a channel. (Static reminders belong in Slack's `/remind`.)",
+    lines: [
+      "• `schedule add <name> \"<when>\" <prompt>` — posts every run",
+      "• `schedule watch <name> \"<when>\" <prompt>` — posts only when something warrants attention",
+      "• `\"<when>\"` is plain English (`\"every weekday at 9am\"`, `\"every 15 minutes\"`) or cron; flags `--tz`, `--channel`",
+      "• `schedule list` / `schedule show <name>`",
+      "• `schedule run <name>` — fire it now",
+      "• `schedule pause|resume|delete <name>`",
+      "• New jobs are on probation: the first results arrive in your DM with approval buttons",
+    ],
+  },
+  {
     key: "role",
     title: "Roles",
     visibleTo: "anyone",

@@ -28,6 +28,7 @@ import { handleMemoryCommand } from "./memory-commands.js";
 import { handleKnowledgeCommand, type KnowledgeImportFile } from "./knowledge-commands.js";
 import { handleHelpCommand } from "./help-commands.js";
 import { handleStatsCommand } from "./stats-commands.js";
+import { handleScheduleCommand } from "./schedule-commands.js";
 
 /** Send an ephemeral denial message visible only to the requesting user. */
 async function denyAccess(
@@ -192,6 +193,15 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
     if (memoryReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: memoryReply });
       return;
+    }
+
+    // ── Scheduled jobs (developer-only for mutations, list/show open) ──
+    if (/^schedule\b/i.test(question)) {
+      const scheduleReply = await handleScheduleCommand(question, channelId, userId, client);
+      if (scheduleReply) {
+        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: scheduleReply });
+        return;
+      }
     }
 
     // ── Knowledge commands (admin-only for mutations, open for list/view) ──

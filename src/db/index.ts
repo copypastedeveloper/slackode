@@ -208,6 +208,49 @@ export function getDb(): Database.Database {
       )
     `);
     db.exec(`
+      CREATE TABLE IF NOT EXISTS scheduled_jobs (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL CHECK (kind IN ('cron', 'oneshot', 'watcher')),
+        cron TEXT,
+        timezone TEXT NOT NULL DEFAULT 'America/Chicago',
+        run_at INTEGER,
+        channel_id TEXT NOT NULL,
+        thread_ts TEXT,
+        prompt TEXT NOT NULL,
+        repo TEXT,
+        path TEXT,
+        ref TEXT,
+        created_by TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        probation_remaining INTEGER NOT NULL DEFAULT 3,
+        next_run_at INTEGER,
+        last_run_at INTEGER,
+        last_status TEXT,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_due ON scheduled_jobs(enabled, next_run_at)`);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS job_runs (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES scheduled_jobs(id),
+        started_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        finished_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'running',
+        error TEXT,
+        posted_ts TEXT,
+        snapshot_json TEXT,
+        post_markdown TEXT,
+        upload_file_ids TEXT
+      )
+    `);
+    for (const col of ["post_markdown", "upload_file_ids"]) {
+      try { db.exec(`ALTER TABLE job_runs ADD COLUMN ${col} TEXT`); } catch { /* exists */ }
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_id, started_at)`);
+    db.exec(`
       CREATE TABLE IF NOT EXISTS turns (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts INTEGER NOT NULL DEFAULT (unixepoch()),
