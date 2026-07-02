@@ -187,6 +187,8 @@ export interface AskResult {
   text: string;
   isQuestion: boolean;
   compacted: boolean;
+  /** True when the session produced no real answer (watchdog bail-out or empty response) and `text` is a canned apology. */
+  failed?: boolean;
 }
 
 export interface AskQuestionOpts {
@@ -306,6 +308,7 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
       text: "Sorry — that took too long and I had to give up (the assistant backend stopped responding). Please try again.",
       isQuestion: false,
       compacted: false,
+      failed: true,
     };
   }
 
@@ -313,7 +316,7 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   if (!stream.text) {
     console.warn("[opencode] empty answer", JSON.stringify({ sessionId, ...stream.diag }));
     recordTurnIfRequested(analytics, { ...baseTurn, outcome: "empty" });
-    return { text: "I wasn't able to generate a response. Please try again.", isQuestion: false, compacted: false };
+    return { text: "I wasn't able to generate a response. Please try again.", isQuestion: false, compacted: false, failed: true };
   }
 
   recordTurnIfRequested(analytics, {

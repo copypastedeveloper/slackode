@@ -56,6 +56,10 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
           channelId: job.channel_id,
         },
       });
+      if (result.failed) {
+        // The canned apology is not job output — surface the failure instead of posting it.
+        throw new Error(`Session produced no output: ${result.text}`);
+      }
       text = result.text;
     } finally {
       clearTimeout(timeout);
