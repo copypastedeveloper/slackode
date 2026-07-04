@@ -25,12 +25,21 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
   const model = process.env.MODEL ?? "claude-sonnet-4.6";
   config.model = `${provider}/${model}`;
 
-  // Scheduled jobs can run on a cheaper model (e.g. a Haiku-class one) —
-  // high-frequency watchers don't need the flagship. Unset = inherit config.model.
+  // Scheduled jobs can run on a cheaper model and/or a lower reasoning-effort
+  // variant — unattended recipes don't need the flagship thinking hard.
+  // Unset = inherit config.model at its default variant.
   const jobsModel = process.env.JOBS_MODEL;
-  if (jobsModel && config.agent?.job) {
-    config.agent.job.model = jobsModel.includes("/") ? jobsModel : `${provider}/${jobsModel}`;
-    console.log(`[config] job agent model: ${config.agent.job.model}`);
+  const jobsVariant = process.env.JOBS_VARIANT; // minimal | low | medium | high
+  if (config.agent?.job) {
+    if (jobsModel) {
+      config.agent.job.model = jobsModel.includes("/") ? jobsModel : `${provider}/${jobsModel}`;
+    }
+    if (jobsVariant) {
+      config.agent.job.variant = jobsVariant;
+    }
+    if (jobsModel || jobsVariant) {
+      console.log(`[config] job agent model: ${config.agent.job.model ?? config.model}${jobsVariant ? ` (variant: ${jobsVariant})` : ""}`);
+    }
   }
 
   // Disable opencode's git snapshot feature. Snapshots track file edits, but this is a
@@ -178,6 +187,24 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
       };
     }
     console.log(`[config] Generated agent variants for: ${enabled.join(", ")}`);
+
+    // Mirror the variants for the job agent (job-linear, job-linear-sentry, ...)
+    // so scheduled jobs inherit the MCP tool access of their target channel.
+    // Spreading the job agent keeps its lockdown (no write/edit/question, no
+    // scheduler*) and its model/variant overrides.
+    const jobAgent = config.agent.job;
+    if (jobAgent) {
+      for (let mask = 1; mask < (1 << count); mask++) {
+        const subset = enabled.filter((_, i) => mask & (1 << i)).sort();
+        const toolOverrides: Record<string, boolean> = {};
+        for (const t of subset) toolOverrides[`${t}*`] = true;
+        config.agent[`job-${subset.join("-")}`] = {
+          ...jobAgent,
+          description: `${jobAgent.description} with ${subset.join(", ")} tools`,
+          tools: { ...jobAgent.tools, ...toolOverrides },
+        };
+      }
+    }
 
     // Create a single enrich agent variant with ALL MCP tools enabled.
     // This is used for fast context enrichment before coding sessions.

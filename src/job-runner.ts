@@ -1,5 +1,6 @@
 import { mkdirSync, rmSync, existsSync } from "node:fs";
 import type { WebClient } from "@slack/web-api";
+import { getChannelTools, resolveJobAgent } from "./sessions.js";
 import { createSession, askQuestion } from "./opencode.js";
 import { formatResponse } from "./utils/formatting.js";
 import { Action } from "./constants.js";
@@ -45,11 +46,13 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
     const timeout = setTimeout(() => controller.abort(), JOB_TIMEOUT_MS);
     let text: string;
     try {
+      // Jobs inherit the MCP tool access of the channel they post to.
+      const agent = resolveJobAgent(getChannelTools(job.channel_id));
       const result = await askQuestion({
         sessionId,
         question,
         isNewSession: true,
-        agent: "job",
+        agent,
         abortSignal: controller.signal,
         analytics: {
           userId: `job::${job.name}`,

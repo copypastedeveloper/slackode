@@ -85,6 +85,16 @@ export function resolveAgent(channelAgent?: string, channelTools?: string[]): st
   return `build-${sorted.join("-")}`;
 }
 
+/**
+ * Agent for an unattended job run: the locked-down job agent, upgraded to the
+ * variant carrying the target channel's MCP tools (mirrors resolveAgent naming).
+ */
+export function resolveJobAgent(channelTools?: string[]): string {
+  if (!channelTools || channelTools.length === 0) return "job";
+  const sorted = [...channelTools].sort();
+  return `job-${sorted.join("-")}`;
+}
+
 // ── Channel config ──
 
 export function getChannelConfig(
