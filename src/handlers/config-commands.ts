@@ -5,7 +5,6 @@ import {
   getChannelConfig, setChannelConfig, clearChannelConfig, listChannelConfigs,
   getChannelRepo, setChannelRepo, clearChannelRepo, listChannelRepos,
   getRepo, getDefaultRepo, getAllRepos,
-  hasRole,
 } from "../sessions.js";
 import { getKnownTools, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
 
@@ -25,8 +24,8 @@ import { getKnownTools, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
  *   config clear prompt
  *
  * Any command may carry `--channel <#chan>` to target a channel other than the
- * one the message was sent in (developer-only; the bot need not be a member —
- * channel config is DB-only).
+ * one the message was sent in (the bot need not be a member — channel config
+ * is DB-only).
  *
  * Returns the reply text if it was a config command, or null if not.
  * Shared between mention and DM handlers.
@@ -46,9 +45,6 @@ export async function handleConfigCommand(
   // Optional cross-channel targeting: `--channel <#C0123|name>` anywhere in the command.
   const channelFlag = subcommand.match(/\s*--channel\s+<#([A-Z0-9]+)(?:\|([^>]*))?>\s*/i);
   if (channelFlag) {
-    if (!hasRole(userId, "developer")) {
-      return "Configuring another channel requires *developer* permissions. Ask an admin to run `role add @you developer`.";
-    }
     channelId = channelFlag[1];
     channelName = channelFlag[2] || (await resolveChannelName(client, channelId)) || channelId;
     subcommand = subcommand.replace(channelFlag[0], " ").trim();
@@ -293,7 +289,7 @@ export async function handleConfigCommand(
     "• `config list repos`",
     "• `config available repos`",
     "• `config list channels` — unified per-channel view (agent + tools + repo + prompt)",
-    "• Add `--channel <#chan>` to any command to configure a channel you're not in (developer-only)",
+    "• Add `--channel <#chan>` to any command to configure a channel you're not in",
   ].join("\n");
 }
 

@@ -29,7 +29,7 @@ const FAMILIES: Family[] = [
       "• `config set repo <name>` / `config get repo` / `config clear repo`",
       "• `config available agents|tools|repos` — list what can be selected",
       "• `config list channels` — unified view of every channel's overrides",
-      "• Add `--channel <#chan>` to any command to configure another channel remotely (developer-only; works from DMs, bot membership not required)",
+      "• Add `--channel <#chan>` to any command to configure another channel remotely (works from DMs; bot membership not required)",
     ],
   },
   {
