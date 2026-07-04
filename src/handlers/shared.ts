@@ -149,7 +149,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
 
     // ── Open to all: channel-scoped config ──
     const configReply = await handleConfigCommand(
-      question, channelId, channelName ?? slackCtx.channelName, userId,
+      question, channelId, channelName ?? slackCtx.channelName, userId, client,
     );
     if (configReply) {
       await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: configReply });
