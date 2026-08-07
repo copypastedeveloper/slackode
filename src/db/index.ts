@@ -227,11 +227,16 @@ export function getDb(): Database.Database {
         next_run_at INTEGER,
         last_run_at INTEGER,
         last_status TEXT,
+        owner_pending INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL DEFAULT (unixepoch()),
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_due ON scheduled_jobs(enabled, next_run_at)`);
+    // owner_pending: a conversationally-created job whose owner (created_by) was
+    // filled in by the model and must be corrected to the real requester by the
+    // handler after the session. See resolveJobOwnership in handlers/shared.ts.
+    try { db.exec(`ALTER TABLE scheduled_jobs ADD COLUMN owner_pending INTEGER NOT NULL DEFAULT 0`); } catch { /* exists */ }
     db.exec(`
       CREATE TABLE IF NOT EXISTS job_runs (
         id TEXT PRIMARY KEY,

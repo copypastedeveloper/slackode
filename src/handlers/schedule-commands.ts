@@ -18,11 +18,11 @@ const HELP = [
   "• `schedule watch <name> \"<when>\" <prompt>` — posts *only* when something warrants attention",
   "  e.g. `schedule watch error-trends \"every 15 minutes\" Check OpenSearch for new error trends and raise anything that looks like an incident.`",
   "• `\"<when>\"` takes plain English (`\"every weekday at 9am\"`, `\"mondays at 8:30am\"`, `\"every 15 minutes\"`) or a cron expression. Flags: `--tz <zone>`, `--channel <#chan>`.",
-  "• `schedule list` / `schedule show <name>`",
+  "• `schedule list` (your jobs) / `schedule list --all` (everyone's) / `schedule show <name>`",
   "• `schedule run <name>` — fire it now",
   "• `schedule pause <name>` / `schedule resume <name>` / `schedule delete <name>`",
   "",
-  "Creating a job runs it immediately: the result comes to your DM with *Approve & post / Needs work / Pause job* buttons, and the job goes live once you approve. *Needs work* starts a thread where you describe changes conversationally.",
+  "Creating a job runs it immediately: the result comes to your DM for review. *Approve* activates the job without posting the draft (it posts on its schedule); *Approve & post* also publishes that draft now; *Needs work* starts a thread where you describe changes conversationally; *Pause job* stops it.",
   `Limits: ${MAX_ACTIVE_JOBS_PER_USER} active jobs per person, nothing more frequent than every ${MIN_JOB_INTERVAL_MINUTES} minutes. You manage your own jobs; developers can manage anyone's.`,
 ].join("\n");
 
@@ -47,9 +47,9 @@ export async function handleScheduleCommand(
 
   switch (sub.toLowerCase()) {
     case "list":
-      return renderList();
+      return renderList(userId, args);
     case "show":
-      return renderShow(args);
+      return renderShow(args, userId);
     case "add":
       return handleAdd(args, channelId, userId, "cron");
     case "watch":
@@ -212,20 +212,31 @@ function handleRun(name: string, client: WebClient, userId: string): string {
   return `:rocket: Running \`${job.name}\` now — results will post to <#${job.channel_id}>.`;
 }
 
-function renderList(): string {
-  const jobs = listJobs();
-  if (jobs.length === 0) return "No scheduled jobs yet. `schedule help` to create one.";
+function renderList(userId: string, args: string): string {
+  const all = /(^|\s)--all(\s|$)/i.test(args);
+  const jobs = listJobs().filter((j) => all || j.created_by === userId);
+  if (jobs.length === 0) {
+    return all
+      ? "No scheduled jobs yet. `schedule help` to create one."
+      : "You have no scheduled jobs. `schedule list --all` to see everyone's, or `schedule help` to create one.";
+  }
   const lines = jobs.map((j) => {
     const state = j.enabled ? (j.next_run_at ? `next ${fmtTime(j.next_run_at)}` : "no next run") : "paused";
     const probation = j.probation_remaining > 0 ? ` · :test_tube: ${j.probation_remaining} approvals left` : "";
-    return `• \`${j.name}\` — ${j.kind} \`${j.cron ?? ""}\` → <#${j.channel_id}> (${state}${j.last_status ? ` · last: ${j.last_status}` : ""}${probation})`;
+    const owner = all ? ` · <@${j.created_by}>` : "";
+    return `• \`${j.name}\` — ${j.kind} \`${j.cron ?? ""}\` → <#${j.channel_id}> (${state}${j.last_status ? ` · last: ${j.last_status}` : ""}${probation})${owner}`;
   });
-  return ["*Scheduled jobs*", ...lines].join("\n");
+  const header = all ? "*Scheduled jobs (all)*" : "*Your scheduled jobs*";
+  return [header, ...lines].join("\n");
 }
 
-function renderShow(name: string): string {
+function renderShow(name: string, userId: string): string {
   const job = getJob(name.trim());
   if (!job) return unknownJob(name);
+  // Full details (prompt, run history) are visible only to the owner or a developer.
+  if (job.created_by !== userId && !hasRole(userId, "developer")) {
+    return `\`${job.name}\` belongs to <@${job.created_by}> — only they (or a developer) can view its details. \`schedule list --all\` shows names and schedules.`;
+  }
   const runs = getRecentRuns(job.id);
   const runLines = runs.length
     ? runs.map((r) => `• ${fmtTime(r.started_at)} — ${r.status}${r.error ? `: ${r.error.slice(0, 120)}` : ""}`)

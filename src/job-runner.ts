@@ -155,12 +155,13 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
     if (probation) {
       await client.chat.postMessage({
         channel: target,
-        text: `Approve this run of \`${job.name}\`, or tell me what to change?`,
+        text: `Review this run of \`${job.name}\`. *Approve* activates it (no post now — it posts to <#${job.channel_id}> on its schedule); *Approve & post* also publishes this draft now.`,
         blocks: [
           {
             type: "actions",
             elements: [
-              { type: "button", style: "primary", text: { type: "plain_text", text: "Approve & post" }, action_id: Action.JOB_POST, value: runId },
+              { type: "button", style: "primary", text: { type: "plain_text", text: "Approve" }, action_id: Action.JOB_APPROVE, value: runId },
+              { type: "button", text: { type: "plain_text", text: "Approve & post" }, action_id: Action.JOB_POST, value: runId },
               { type: "button", text: { type: "plain_text", text: "Needs work" }, action_id: Action.JOB_NEEDS_WORK, value: runId },
               { type: "button", style: "danger", text: { type: "plain_text", text: "Pause job" }, action_id: Action.JOB_PAUSE, value: runId },
             ],
@@ -330,6 +331,19 @@ export async function approveProbationRun(runId: string, client: WebClient): Pro
   return left > 0
     ? `:white_check_mark: Posted to <#${job.channel_id}>. ${left} review${left === 1 ? "" : "s"} left before \`${job.name}\` goes fully live.`
     : `:white_check_mark: Posted to <#${job.channel_id}> — \`${job.name}\` is approved and will post there directly on its schedule from now on.`;
+}
+
+/** [Approve]: count the approval and activate the job, WITHOUT publishing this draft to the channel. */
+export function approveProbationRunNoPost(runId: string): string {
+  const run = getRun(runId);
+  const job = run && getJobById(run.job_id);
+  if (!run || !job) return "That run no longer exists.";
+
+  decrementProbation(job.id);
+  const left = Math.max(job.probation_remaining - 1, 0);
+  return left > 0
+    ? `:white_check_mark: Approved \`${job.name}\` — nothing posted. ${left} review${left === 1 ? "" : "s"} left before it posts to <#${job.channel_id}> automatically on its schedule.`
+    : `:white_check_mark: Approved \`${job.name}\` — nothing posted now. It will post to <#${job.channel_id}> on its next scheduled run.`;
 }
 
 /** [Needs work]: seed a conversational edit — the user replies in-thread and the agent updates the job. */

@@ -11,7 +11,7 @@ import {
 import { startPeriodicTokenRefresh, stopPeriodicTokenRefresh } from "./mcp/oauth-refresh.js";
 import { startPeriodicGDocsSync, stopPeriodicGDocsSync } from "./gdocs-sync.js";
 import { startScheduler, stopScheduler } from "./scheduler.js";
-import { approveProbationRun, rejectProbationRun, pauseJobFromRun } from "./job-runner.js";
+import { approveProbationRun, approveProbationRunNoPost, rejectProbationRun, pauseJobFromRun } from "./job-runner.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
@@ -106,6 +106,7 @@ function registerProbationAction(actionId: string, handle: (runId: string) => Pr
   });
 }
 registerProbationAction(Action.JOB_POST, (runId) => approveProbationRun(runId, app.client));
+registerProbationAction(Action.JOB_APPROVE, (runId) => approveProbationRunNoPost(runId));
 registerProbationAction(Action.JOB_NEEDS_WORK, rejectProbationRun);
 registerProbationAction(Action.JOB_PAUSE, pauseJobFromRun);
 

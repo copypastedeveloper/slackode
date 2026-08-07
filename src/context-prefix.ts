@@ -243,6 +243,7 @@ function appendContextBlock(lines: string[], ctx: SlackContext): void {
   // IDs are included so tools that take user/channel arguments (e.g. the
   // scheduler tools) can be called with the real Slack IDs, not display names.
   lines.push(`User: ${ctx.userName} (user ID: ${ctx.userId})`);
+  if (ctx.threadTs) lines.push(`Thread ID: ${ctx.threadTs}`);
   if (ctx.userTitle) lines.push(`Role/Title: ${ctx.userTitle}`);
   if (ctx.userStatusText) lines.push(`Status: ${ctx.userStatusText}`);
   lines.push(`Channel: ${ctx.channelName} (channel ID: ${ctx.channelId}, ${ctx.channelType})`);

@@ -25,6 +25,8 @@ export interface JobRow {
   next_run_at: number | null;
   last_run_at: number | null;
   last_status: string | null;
+  /** 1 while a conversationally-created job awaits owner correction by the handler. */
+  owner_pending: number;
   created_at: number;
   updated_at: number;
 }
@@ -53,22 +55,34 @@ export interface CreateJobOpts {
   prompt: string;
   createdBy: string;
   nextRunAt: number;
+  /** Mark the recorded owner as provisional (model-supplied) pending handler correction. */
+  ownerPending?: boolean;
 }
 
 export function createJob(opts: CreateJobOpts): JobRow {
   const id = randomUUID();
   getDb()
     .prepare(`
-      INSERT INTO scheduled_jobs (id, name, kind, cron, timezone, run_at, channel_id, thread_ts, prompt, created_by, next_run_at, probation_remaining)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO scheduled_jobs (id, name, kind, cron, timezone, run_at, channel_id, thread_ts, prompt, created_by, next_run_at, probation_remaining, owner_pending)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       id, opts.name, opts.kind, opts.cron ?? null,
       opts.timezone ?? "America/Chicago", opts.runAt ?? null,
       opts.channelId, opts.threadTs ?? null, opts.prompt, opts.createdBy, opts.nextRunAt,
-      PROBATION_RUNS,
+      PROBATION_RUNS, opts.ownerPending ? 1 : 0,
     );
   return getJob(opts.name)!;
+}
+
+/**
+ * Correct a provisionally-owned job to its real owner and clear the pending flag.
+ * Used by the handler once the authoritative requesting user is known.
+ */
+export function reassignJobOwner(id: string, userId: string): void {
+  getDb()
+    .prepare("UPDATE scheduled_jobs SET created_by = ?, owner_pending = 0, updated_at = unixepoch() WHERE id = ?")
+    .run(userId, id);
 }
 
 export function getJob(name: string): JobRow | undefined {

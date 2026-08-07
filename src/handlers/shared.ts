@@ -8,6 +8,8 @@ import {
   isSessionCompacted, setSessionCompacted,
   hasRole,
 } from "../sessions.js";
+import { listJobs, getJobById, reassignJobOwner } from "../db/jobs.js";
+import { runJob } from "../job-runner.js";
 import { askQuestion, askForShorterResponse } from "../opencode.js";
 import type { RepoInfo } from "../context-prefix.js";
 import { isRestarting, waitForRestart } from "../opencode-server.js";
@@ -399,6 +401,9 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     return;
   }
 
+  // Surface the thread so scheduler tools can tag jobs with their origin thread.
+  slackCtx.threadTs = threadTs;
+
   // Attach per-channel custom prompt if configured
   const channelConfig = getChannelConfig(channel);
   if (channelConfig) {
@@ -449,6 +454,10 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     },
   };
 
+  // Snapshot existing jobs so we can detect any the agent creates during this
+  // session and correct their (model-supplied) owner to the real requester.
+  const jobIdsBefore = new Set(listJobs().map((j) => j.id));
+
   let result;
   try {
     result = await askQuestion(askOpts);
@@ -477,6 +486,65 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     rawMarkdown: result.text,
     sessionId,
   });
+
+  // If the agent scheduled a job this session, its owner (created_by) was
+  // model-supplied and may be wrong. Correct it to the real requester and fire
+  // the deferred review run so the confirmation DM reaches the right person.
+  await reconcilePendingJobOwnership(jobIdsBefore, slackCtx.userId, threadTs, client);
+}
+
+/**
+ * Jobs created conversationally record a model-supplied owner (see the
+ * scheduler MCP) and are flagged owner_pending with their first run deferred.
+ * After the session, reassign any such new job to the authoritative requesting
+ * user and fire its review run — the review posts only to the owner's DM
+ * (probation), so this both fixes ownership and routes the confirmation DM
+ * to the person who actually asked.
+ *
+ * Attribution: a new owner_pending job is claimed by this session when its
+ * recorded thread_ts matches this thread (the reliable case — there is exactly
+ * one Thread ID in context, so the model can't confuse it the way it confuses
+ * user IDs). Jobs stamped with a *different* thread belong to a concurrent
+ * session and are left alone. A job with no thread falls back to the
+ * "created during this session's window" heuristic.
+ */
+async function reconcilePendingJobOwnership(
+  before: Set<string>,
+  userId: string | undefined,
+  threadTs: string,
+  client: WebClient,
+): Promise<void> {
+  if (!userId) return;
+  let pending;
+  try {
+    pending = listJobs().filter((j) => {
+      if (!j.owner_pending) return false;
+      // Thread-tagged jobs: claim only our own thread's, ignore other threads'.
+      if (j.thread_ts) return j.thread_ts === threadTs;
+      // Untagged (model omitted Thread ID): fall back to the session window.
+      return !before.has(j.id);
+    });
+  } catch (err) {
+    console.error("[jobs] ownership reconcile: listJobs failed:", err);
+    return;
+  }
+  for (const job of pending) {
+    try {
+      if (job.created_by !== userId) {
+        console.log(`[jobs] correcting owner of ${job.name}: ${job.created_by} -> ${userId}`);
+      }
+      reassignJobOwner(job.id, userId);
+      const fresh = getJobById(job.id);
+      if (fresh) {
+        // Fire-and-forget: the review run spawns its own session and DMs the owner.
+        runJob(fresh, client).catch((err) =>
+          console.error(`[jobs] deferred review run for ${fresh.name} failed:`, err),
+        );
+      }
+    } catch (err) {
+      console.error(`[jobs] ownership reconcile failed for ${job.name}:`, err);
+    }
+  }
 }
 
 // ── Safe Slack posting (catches msg_too_long and falls back) ──

@@ -12,6 +12,8 @@ export interface SlackContext {
   channelTopic: string;
   channelPurpose: string;
   channelType: "dm" | "channel";
+  /** The Slack thread this session belongs to — surfaced so scheduler tools can tag jobs. */
+  threadTs?: string;
   customPrompt?: string;
   threadContext?: string;
   linkedThreadContext?: string;

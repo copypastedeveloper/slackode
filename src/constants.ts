@@ -13,7 +13,13 @@ export const Action = {
   SELECT_REPO_PREFIX: "select_repo_",
   GITHUB_CONNECT: "github_connect",
   OAUTH_COMPLETE: "oauth_complete",
+  /** Open the per-server tool-allowlist modal. value = tool name. */
+  TOOL_CONFIGURE: "tool_configure",
+  /** Retry loading the tool list inside the configure modal. value = tool name. */
+  TOOL_CONFIGURE_RETRY: "tool_configure_retry",
   JOB_POST: "job_post",
+  /** Approve/activate the job without publishing the reviewed draft to the channel. */
+  JOB_APPROVE: "job_approve",
   JOB_NEEDS_WORK: "job_needs_work",
   JOB_PAUSE: "job_pause",
 } as const;

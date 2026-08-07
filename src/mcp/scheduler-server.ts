@@ -83,10 +83,11 @@ server.tool(
     prompt: z.string().describe("Fully self-contained task instructions for the unattended run"),
     kind: z.enum(["report", "watcher"]).describe("'report' posts every run; 'watcher' posts only when something warrants attention"),
     channel_id: z.string().describe("Slack channel ID to post results to (from the conversation context; use the current channel unless the user names another)"),
-    created_by: z.string().describe("Slack user ID of the requesting user (from the conversation context)"),
+    created_by: z.string().describe("Slack user ID of the CURRENT requesting user — copy it verbatim from the 'User: … (user ID: U…)' line in your context. NEVER use a user ID that appears only inside <thread_context> or the message body; those belong to other people. If unsure, use the User: line."),
+    thread_ts: z.string().optional().describe("Copy the 'Thread ID:' value from your context verbatim, if present. Used to route the review DM to the correct requester; do not invent or guess it."),
     timezone: z.string().optional().describe(`IANA timezone for the schedule (default ${DEFAULT_TZ})`),
   },
-  async ({ name, when, prompt, kind, channel_id, created_by, timezone }) => {
+  async ({ name, when, prompt, kind, channel_id, created_by, thread_ts, timezone }) => {
     console.error(`[scheduler-mcp] create_scheduled_job: ${name} "${when}" by ${created_by}`);
     const capped = checkJobCap(created_by);
     if (capped) return text(capped);
@@ -96,23 +97,30 @@ server.tool(
     const resolved = resolveWhen(when, tz);
     if (typeof resolved === "string") return text(resolved);
 
-    if (!nextCronRun(resolved.cron, tz)) return text("That schedule never fires.");
+    const nextSlot = nextCronRun(resolved.cron, tz);
+    if (!nextSlot) return text("That schedule never fires.");
 
-    // Fire immediately: the review run lands in the owner's DM, then the
-    // schedule takes over at its natural next slot.
+    // The owner (created_by) is model-supplied and can be wrong when the thread
+    // contains other people's IDs. Mark it owner_pending and defer the review
+    // run to the bot: after the session it corrects the owner to the real
+    // requester and fires the review run so the DM reaches the right person.
+    // Falling back to the real next slot (not now-1) prevents the 30s scheduler
+    // tick from DMing the wrong owner before that correction happens.
     const job = createJob({
       name,
       kind: kind === "watcher" ? "watcher" : "cron",
       cron: resolved.cron,
       timezone: tz,
       channelId: channel_id,
+      threadTs: thread_ts,
       prompt,
       createdBy: created_by,
-      nextRunAt: Math.floor(Date.now() / 1000) - 1,
+      nextRunAt: nextSlot,
+      ownerPending: true,
     });
     return text(
       `Created ${kind} "${job.name}" — ${resolved.description} (${tz}), posting to <#${channel_id}>. ` +
-      `A review run starts now: the result reaches <@${created_by}>'s DM within a minute with Approve/Needs-work buttons, and the job goes live once approved. ` +
+      `A review run starts now: the result reaches the requesting user's DM within a minute with Approve/Needs-work buttons, and the job goes live once approved. ` +
       `Tell the user this, including the schedule as you understood it.`,
     );
   },
@@ -193,18 +201,28 @@ server.tool(
 
 server.tool(
   "list_scheduled_jobs",
-  "List all scheduled jobs with their schedules, prompts, state, and last outcome. " +
-    "Use before updating a job (to fetch its current prompt) or when the user asks what's scheduled.",
-  {},
-  async () => {
-    const jobs = listJobs();
-    if (jobs.length === 0) return text("No scheduled jobs exist.");
-    const lines = jobs.map((j) => [
-      `name: ${j.name}`,
-      `kind: ${j.kind} | cron: ${j.cron} | tz: ${j.timezone} | enabled: ${!!j.enabled} | probation_left: ${j.probation_remaining}`,
-      `channel: ${j.channel_id} | owner: ${j.created_by} | last: ${j.last_status ?? "never ran"}`,
-      `prompt: ${j.prompt}`,
-    ].join("\n"));
+  "List scheduled jobs with their schedules, prompts, state, and last outcome. " +
+    "By default lists only the requesting user's own jobs; set include_all to see everyone's " +
+    "(other people's prompts are hidden). Use before updating a job (to fetch its current prompt) or when the user asks what's scheduled.",
+  {
+    requested_by: z.string().describe("Slack user ID of the CURRENT requesting user — copy verbatim from the 'User: … (user ID: U…)' line in your context, never from thread history."),
+    include_all: z.boolean().optional().describe("Set true only when the user explicitly asks to see everyone's jobs. Others' prompts are still hidden."),
+  },
+  async ({ requested_by, include_all }) => {
+    const all = listJobs();
+    const jobs = include_all ? all : all.filter((j) => j.created_by === requested_by);
+    if (jobs.length === 0) {
+      return text(include_all ? "No scheduled jobs exist." : "You have no scheduled jobs. Ask to include everyone's to see the full list.");
+    }
+    const lines = jobs.map((j) => {
+      const own = j.created_by === requested_by;
+      return [
+        `name: ${j.name}`,
+        `kind: ${j.kind} | cron: ${j.cron} | tz: ${j.timezone} | enabled: ${!!j.enabled} | probation_left: ${j.probation_remaining}`,
+        `channel: ${j.channel_id} | owner: ${j.created_by} | last: ${j.last_status ?? "never ran"}`,
+        own ? `prompt: ${j.prompt}` : `prompt: (hidden — owned by another user)`,
+      ].join("\n");
+    });
     return text(lines.join("\n\n---\n\n"));
   },
 );
