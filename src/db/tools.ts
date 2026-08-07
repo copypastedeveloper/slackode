@@ -17,8 +17,16 @@ export interface ToolRow {
   key_tag: string | null;
   auth_type: AuthType;
   enabled: number;
+  /** Comma-separated MCP tool names/globs to allow; null/empty = all tools. */
+  allowed_tools: string | null;
   created_at: number;
   updated_at: number;
+}
+
+/** Parse the stored allowed_tools CSV into a trimmed list; empty list = all allowed. */
+export function parseAllowedTools(csv: string | null | undefined): string[] {
+  if (!csv) return [];
+  return csv.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 export function getToolFromDb(name: string): ToolRow | undefined {
@@ -118,6 +126,14 @@ export function setToolEnabled(name: string, enabled: boolean): void {
   getDb()
     .prepare("UPDATE tools SET enabled = ?, updated_at = unixepoch() WHERE name = ?")
     .run(enabled ? 1 : 0, name);
+}
+
+/** Set (or clear, with null) the per-server tool allowlist. */
+export function setToolAllowedTools(name: string, tools: string[] | null): void {
+  const csv = tools && tools.length > 0 ? tools.join(",") : null;
+  getDb()
+    .prepare("UPDATE tools SET allowed_tools = ?, updated_at = unixepoch() WHERE name = ?")
+    .run(csv, name);
 }
 
 /**

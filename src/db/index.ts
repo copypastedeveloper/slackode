@@ -115,10 +115,18 @@ export function getDb(): Database.Database {
         key_iv TEXT,
         key_tag TEXT,
         enabled INTEGER NOT NULL DEFAULT 1,
+        allowed_tools TEXT,
         created_at INTEGER NOT NULL DEFAULT (unixepoch()),
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    // allowed_tools: comma-separated MCP tool names (or globs) to allow for this
+    // server; NULL/empty means all tools are allowed. See opencode-config.ts.
+    try {
+      db.exec(`ALTER TABLE tools ADD COLUMN allowed_tools TEXT`);
+    } catch {
+      // Column already exists — ignore.
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS repos (
         name TEXT PRIMARY KEY,

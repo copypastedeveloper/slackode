@@ -1,4 +1,16 @@
 import { getDb } from "./index.js";
+import { getActiveTools } from "../active-tools.js";
+
+/**
+ * Drop channel tools that didn't make it into the generated config (removed,
+ * disabled, or unauthorized) — otherwise the composed agent name references a
+ * variant that doesn't exist and every prompt in the channel fails.
+ */
+function filterToActive(channelTools: string[]): string[] {
+  const active = getActiveTools();
+  if (!active) return channelTools; // config not generated yet — don't guess
+  return channelTools.filter((t) => active.has(t));
+}
 
 // --- Channel-to-agent mapping ---
 
@@ -81,7 +93,8 @@ export function listChannelTools(): ChannelToolsRow[] {
 export function resolveAgent(channelAgent?: string, channelTools?: string[]): string | undefined {
   if (channelAgent) return channelAgent;
   if (!channelTools || channelTools.length === 0) return undefined;
-  const sorted = [...channelTools].sort();
+  const sorted = filterToActive(channelTools).sort();
+  if (sorted.length === 0) return undefined;
   return `build-${sorted.join("-")}`;
 }
 
@@ -91,7 +104,8 @@ export function resolveAgent(channelAgent?: string, channelTools?: string[]): st
  */
 export function resolveJobAgent(channelTools?: string[]): string {
   if (!channelTools || channelTools.length === 0) return "job";
-  const sorted = [...channelTools].sort();
+  const sorted = filterToActive(channelTools).sort();
+  if (sorted.length === 0) return "job";
   return `job-${sorted.join("-")}`;
 }
 

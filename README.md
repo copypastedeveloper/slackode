@@ -312,6 +312,41 @@ For manual code entry without the modal:
 @Slackode tool auth-code my-oauth-tool <code> <state>
 ```
 
+#### Providers without dynamic client registration
+
+By default the bot registers itself as an OAuth client via Dynamic Client Registration (RFC 7591). Some providers don't support DCR and instead require you to create an OAuth app in their developer console. `tool add` handles this inline — if automatic registration fails, the bot prompts you to paste `<client-id> [client-secret]` (or `cancel`) and then continues the authorization flow.
+
+To set credentials outside the add flow, register the app upstream (use your `OAUTH_REDIRECT_URI` as the redirect URL), then supply its credentials before authorizing:
+
+```
+@Slackode tool set-client my-oauth-tool <client-id> <client-secret>
+@Slackode tool auth my-oauth-tool
+```
+
+The client secret is optional for public clients (PKCE-only). Manually set credentials survive re-auth (`tool auth`) and token invalidation; they're only removed by `tool remove`. Delete the Slack message containing the secret after the bot confirms it stored the credentials.
+
+#### Public / PKCE-only clients
+
+Every OAuth flow uses PKCE. For providers that issue **public clients** (no client secret — auth is PKCE only), there are two paths:
+
+- **Pre-registered**: `tool set-client my-oauth-tool <client-id>` — omitting the secret marks it public; the token exchange authenticates with PKCE and `token_endpoint_auth_method=none`.
+- **Dynamic registration**: `tool auth my-oauth-tool --public` — registers the client via DCR with `token_endpoint_auth_method=none` so the provider issues a public client.
+
+Confidential clients (with a secret) remain the default; nothing changes for them.
+
+### Restricting which tools an MCP server exposes
+
+By default a server exposes all of its tools to the agent. You can restrict that **globally per server** (this is not per-channel — channels only turn whole servers on/off):
+
+```
+@Slackode tool allow my-server search,list_channels   # only these tools
+@Slackode tool allow my-server all                     # reset to all tools
+```
+
+Or use the bespoke UI: after adding/authorizing a server — or from `tool list` — click **Configure tools**. The bot live-queries the server for its tool list and shows checkboxes (current selection pre-checked); saving restarts OpenCode. If the server can't be reached, the modal shows an error with a **Retry** button.
+
+Under the hood each server's tools are disabled globally (`servername_*: false`) and the allowed ones re-enabled per agent variant (`servername_toolname: true`), relying on opencode's last-matching-rule-wins resolution.
+
 ### Usage analytics
 
 Every Q&A round is captured in a local `turns` table — user, channel, agent, repo, tools enabled vs actually used, skills activated, duration, step count, input/output/reasoning/cache tokens, cost, outcome (`success` / `empty` / `aborted` / `timeout` / `too_long` / `provider_error` / `error`), and a compacted flag.

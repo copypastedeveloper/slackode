@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { getEnabledTools, getToolKey, getOAuthAccessToken } from "./sessions.js";
+import { getEnabledTools, getToolKey, getOAuthAccessToken, parseAllowedTools } from "./sessions.js";
 import { ensureFreshToken } from "./mcp/oauth-refresh.js";
+import { setActiveTools } from "./active-tools.js";
 
 /** Path to the pristine base config (without MCP injections). */
 const BASE_CONFIG_PATH = process.env.BASE_CONFIG_PATH ?? "/app/opencode.json";
@@ -163,6 +164,28 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
   }
   console.log("[config] Knowledge MCP server configured.");
 
+  setActiveTools(enabled);
+
+  // Per-server tool allowlists: name -> allowed tool names/globs (empty = all).
+  const allowMap = new Map<string, string[]>();
+  for (const t of tools) allowMap.set(t.name, parseAllowedTools(t.allowed_tools));
+
+  // Add the tool-enable keys for one MCP server to an agent's tool overrides.
+  // With no allowlist, enable the whole server (`name*`). With an allowlist,
+  // enable only the specific `name_<tool>` keys — the global `name*: false`
+  // disables the rest, and opencode's last-matching-rule-wins means the
+  // agent's specific `true` re-enables just those.
+  const addToolEnables = (overrides: Record<string, boolean>, name: string): void => {
+    const allowed = allowMap.get(name) ?? [];
+    if (allowed.length === 0) {
+      overrides[`${name}*`] = true;
+    } else {
+      for (const tool of allowed) {
+        overrides[tool.startsWith(`${name}_`) ? tool : `${name}_${tool}`] = true;
+      }
+    }
+  };
+
   if (enabled.length === 0) {
     console.log("[config] No tool API keys configured.");
   } else {
@@ -174,7 +197,7 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
       const subset = enabled.filter((_, i) => mask & (1 << i)).sort();
       const agentName = `build-${subset.join("-")}`;
       const toolOverrides: Record<string, boolean> = {};
-      for (const t of subset) toolOverrides[`${t}*`] = true;
+      for (const t of subset) addToolEnables(toolOverrides, t);
       config.agent[agentName] = {
         description: `${buildAgent.description} with ${subset.join(", ")} tools`,
         tools: { ...buildAgent.tools, ...toolOverrides },
@@ -197,7 +220,7 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
       for (let mask = 1; mask < (1 << count); mask++) {
         const subset = enabled.filter((_, i) => mask & (1 << i)).sort();
         const toolOverrides: Record<string, boolean> = {};
-        for (const t of subset) toolOverrides[`${t}*`] = true;
+        for (const t of subset) addToolEnables(toolOverrides, t);
         config.agent[`job-${subset.join("-")}`] = {
           ...jobAgent,
           description: `${jobAgent.description} with ${subset.join(", ")} tools`,
@@ -211,7 +234,7 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
     const enrichAgent = config.agent.enrich;
     if (enrichAgent) {
       const allToolOverrides: Record<string, boolean> = {};
-      for (const t of enabled) allToolOverrides[`${t}*`] = true;
+      for (const t of enabled) addToolEnables(allToolOverrides, t);
       config.agent.enrich = {
         ...enrichAgent,
         tools: { ...enrichAgent.tools, ...allToolOverrides },

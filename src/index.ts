@@ -3,7 +3,7 @@ const { App } = bolt;
 import { initOpencode } from "./opencode.js";
 import { closeDb, seedToolsFromFile, bootstrapAdmins, hasRole } from "./sessions.js";
 import { writeOpencodeConfig } from "./opencode-config.js";
-import { setRepoDir, startServer, stopServer } from "./opencode-server.js";
+import { setRepoDir, startServer, stopServer, restartServer } from "./opencode-server.js";
 import { initRepos, generateContextForAllRepos } from "./repo-manager.js";
 import {
   startSessionReaper, destroyAllCodingSessions, cleanupOrphanedSessions,
@@ -19,6 +19,9 @@ import { resumeCodingWithAgent, resumeCodingWithRepo, handleApprove, handleRevis
 import { validateAndStoreGithubPAT } from "./handlers/github-commands.js";
 import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, GITHUB_CONNECT_MODAL_CALLBACK, OAUTH_COMPLETE_MODAL_CALLBACK } from "./constants.js";
 import { completeOAuthExchange } from "./handlers/tool-commands.js";
+import {
+  openConfigureModal, retryConfigureModal, saveConfigureSubmission, TOOL_CONFIGURE_MODAL_CALLBACK,
+} from "./handlers/tool-configure.js";
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN;
@@ -309,6 +312,43 @@ app.view(OAUTH_COMPLETE_MODAL_CALLBACK, async ({ ack, view, body, client }) => {
   await ack();
 
   await completeOAuthExchange(toolName, code, oauthState || undefined, client, channelId, threadTs);
+});
+
+// "Configure tools" button → open the tool-allowlist modal
+app.action(Action.TOOL_CONFIGURE, async ({ action, ack, body, client }) => {
+  await ack();
+  const toolName = (action as { value: string }).value;
+  const triggerId = (body as { trigger_id?: string }).trigger_id;
+  if (!triggerId) return;
+  await openConfigureModal(client, triggerId, toolName);
+});
+
+// Retry button inside the configure modal
+app.action(Action.TOOL_CONFIGURE_RETRY, async ({ action, ack, body, client }) => {
+  await ack();
+  const toolName = (action as { value: string }).value;
+  const viewId = (body as { view?: { id: string } }).view?.id;
+  if (viewId) await retryConfigureModal(client, viewId, toolName);
+});
+
+// Configure-tools modal submission → save allowlist + restart
+app.view(TOOL_CONFIGURE_MODAL_CALLBACK, async ({ ack, view, body, client }) => {
+  await ack();
+  const result = saveConfigureSubmission(view);
+  if (!result) return;
+  const { toolName, selected, all } = result;
+  const elapsed = await restartServer();
+  const summary = all.length > 0 && selected.length === all.length
+    ? `all ${all.length} tools`
+    : `${selected.length} of ${all.length} tools${selected.length ? " (" + selected.join(", ") + ")" : ""}`;
+  const userId = body.user.id;
+  const dm = await client.conversations.open({ users: userId });
+  if (dm.channel?.id) {
+    await client.chat.postMessage({
+      channel: dm.channel.id,
+      text: `:gear: \`${toolName}\` now exposes ${summary}. OpenCode restarted. _(took ${elapsed.toFixed(1)}s)_`,
+    });
+  }
 });
 
 /**
