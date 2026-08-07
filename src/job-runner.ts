@@ -203,11 +203,12 @@ function buildRunPrompt(job: JobRow, scratchDir: string, prevSnapshot?: string):
       : "This is the first run; there is no previous snapshot.",
     `Task:\n${job.prompt}`,
     [
-      "Your final response IS the Slack post — it is forwarded verbatim, so do not wrap it in any label, heading, or preamble (never write 'Slack message to post:' or similar; the first line of your response is the first line people see in Slack).",
+      "Put the Slack message inside a fenced block tagged `post`. ONLY the contents of that block are posted to Slack — any text outside it (your progress notes or narration like 'Now composing the post:') is discarded, so you may think out loud freely outside the block. Do not put a label, heading, or preamble INSIDE the block; its first line is the first line people see in Slack.",
+      "Format exactly like this:\n```post\nYour Slack message here, in markdown.\n```",
       watcher
-        ? "If (and only if) something warrants attention, respond with the message to post (markdown). If nothing does, respond with the single word NO_POST instead — silence is the expected outcome most runs."
-        : "Respond with the message to post (markdown).",
-      `After the message, ${watcher ? "always include" : "optionally include"} a fenced block tagged \`snapshot\` containing compact JSON summarizing what you observed this run (used for comparison next run${watcher ? ", including on NO_POST runs — it is how you avoid re-raising the same finding" : ""}).`,
+        ? "Include the `post` block only if something warrants attention. If nothing does, write the single word NO_POST with no post block — silence is the expected outcome most runs."
+        : "Always include the `post` block.",
+      `${watcher ? "Always include" : "Optionally include"} a fenced block tagged \`snapshot\` containing compact JSON summarizing what you observed this run (used for comparison next run${watcher ? ", including on NO_POST runs — it is how you avoid re-raising the same finding" : ""}).`,
       "Optionally, a fenced block tagged `uploads` listing absolute paths of files to upload, one per line — only files that add value beyond the message itself (charts, images, data extracts). Never attach a copy of the message text or the snapshot.",
     ].join("\n"),
   ].join("\n\n");
@@ -215,11 +216,11 @@ function buildRunPrompt(job: JobRow, scratchDir: string, prevSnapshot?: string):
 
 /** Split the agent's response into the postable message, snapshot JSON, and upload paths. */
 export function parseRunOutput(text: string): { post: string; snapshotJson?: string; uploads: string[]; noPost: boolean } {
-  let post = text;
+  let rest = text;
   let snapshotJson: string | undefined;
   const uploads: string[] = [];
 
-  const snapshotMatch = post.match(/```snapshot\s*\n([\s\S]*?)```/);
+  const snapshotMatch = rest.match(/```snapshot\s*\n([\s\S]*?)```/);
   if (snapshotMatch) {
     const raw = snapshotMatch[1].trim();
     try {
@@ -228,26 +229,38 @@ export function parseRunOutput(text: string): { post: string; snapshotJson?: str
     } catch {
       console.warn("[jobs] snapshot block was not valid JSON — discarding");
     }
-    post = post.replace(snapshotMatch[0], "");
+    rest = rest.replace(snapshotMatch[0], "");
   }
 
-  const uploadsMatch = post.match(/```uploads\s*\n([\s\S]*?)```/);
+  const uploadsMatch = rest.match(/```uploads\s*\n([\s\S]*?)```/);
   if (uploadsMatch) {
     for (const line of uploadsMatch[1].split("\n")) {
       const p = line.trim();
       if (p.startsWith("/")) uploads.push(p);
     }
-    post = post.replace(uploadsMatch[0], "");
+    rest = rest.replace(uploadsMatch[0], "");
   }
 
-  // Strip a leading contract-artifact label line ("Slack message to post:",
-  // "Message:", etc.) — models occasionally echo the response structure.
-  let trimmed = post.trim().replace(/^(?:\*\*|__)?(?:the )?(?:slack )?(?:message|post)(?: to post)?:?(?:\*\*|__)?\s*:?\s*\n+/i, "");
-  trimmed = trimmed.trim();
-  // Tolerate markdown wrapping (**NO_POST**, `NO_POST`) — stripping those chars
-  // also strips the underscore, hence NO_?POST.
-  const noPost = /^NO_?POST\.?$/i.test(trimmed.replace(/[*_`]/g, "").trim());
-  return { post: trimmed, snapshotJson, uploads, noPost };
+  const isNoPost = (s: string) =>
+    // Tolerate markdown wrapping (**NO_POST**, `NO_POST`) — stripping those chars
+    // also strips the underscore, hence NO_?POST.
+    /^NO_?POST\.?$/i.test(s.replace(/[*_`]/g, "").trim());
+
+  // Preferred contract: the message lives in a fenced `post` block; everything
+  // outside it (progress narration) is discarded. (snapshot/uploads already
+  // removed, so the last ``` closes the post block — tolerant of a post that
+  // contains its own code fences.)
+  const postMatch = rest.match(/```post\s*\n([\s\S]*)```/);
+  if (postMatch) {
+    const post = postMatch[1].trim();
+    const noPost = isNoPost(post);
+    return { post: noPost ? "" : post, snapshotJson, uploads, noPost };
+  }
+
+  // Fallback (agent didn't fence the post): treat the remaining text as the
+  // post, stripping a leading contract-artifact label line.
+  const trimmed = rest.trim().replace(/^(?:\*\*|__)?(?:the )?(?:slack )?(?:message|post)(?: to post)?:?(?:\*\*|__)?\s*:?\s*\n+/i, "").trim();
+  return { post: trimmed, snapshotJson, uploads, noPost: isNoPost(trimmed) };
 }
 
 /** Post markdown via the shared formatter; returns the ts of the first message. */
