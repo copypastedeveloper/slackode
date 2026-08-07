@@ -16,6 +16,8 @@ export interface OAuthStateRow {
   refresh_token_tag: string | null;
   expiry_date: number | null;
   code_verifier: string | null;
+  client_manual: number;
+  oauth_public: number;
   updated_at: number;
 }
 
@@ -70,17 +72,23 @@ export function upsertOAuthClientInfo(
     clientSecret?: string | null;
     clientIdIssuedAt?: number | null;
     clientSecretExpiresAt?: number | null;
+    /** True when the admin supplied pre-registered credentials (no DCR). */
+    manual?: boolean;
+    /** True for a public/PKCE-only client (no client secret). */
+    isPublic?: boolean;
   },
 ): void {
   getDb()
     .prepare(`
-      INSERT INTO oauth_state (tool_name, client_id, client_secret, client_id_issued_at, client_secret_expires_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, unixepoch())
+      INSERT INTO oauth_state (tool_name, client_id, client_secret, client_id_issued_at, client_secret_expires_at, client_manual, oauth_public, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())
       ON CONFLICT(tool_name) DO UPDATE SET
         client_id = excluded.client_id,
         client_secret = excluded.client_secret,
         client_id_issued_at = excluded.client_id_issued_at,
         client_secret_expires_at = excluded.client_secret_expires_at,
+        client_manual = excluded.client_manual,
+        oauth_public = excluded.oauth_public,
         updated_at = unixepoch()
     `)
     .run(
@@ -89,7 +97,26 @@ export function upsertOAuthClientInfo(
       info.clientSecret ?? null,
       info.clientIdIssuedAt ?? null,
       info.clientSecretExpiresAt ?? null,
+      info.manual ? 1 : 0,
+      info.isPublic ? 1 : 0,
     );
+}
+
+/**
+ * Mark a tool as a public (PKCE-only) OAuth client before running DCR, so the
+ * client is registered with token_endpoint_auth_method "none" and no secret.
+ * Upserts the row when no client exists yet.
+ */
+export function setOAuthPublic(toolName: string, isPublic: boolean): void {
+  getDb()
+    .prepare(`
+      INSERT INTO oauth_state (tool_name, oauth_public, updated_at)
+      VALUES (?, ?, unixepoch())
+      ON CONFLICT(tool_name) DO UPDATE SET
+        oauth_public = excluded.oauth_public,
+        updated_at = unixepoch()
+    `)
+    .run(toolName, isPublic ? 1 : 0);
 }
 
 export function upsertOAuthCodeVerifier(toolName: string, codeVerifier: string): void {
@@ -128,6 +155,23 @@ export function findAndDeletePendingOAuthState(
 
 export function clearOAuthState(toolName: string): void {
   getDb().prepare("DELETE FROM oauth_state WHERE tool_name = ?").run(toolName);
+}
+
+/**
+ * Clear tokens + code verifier but preserve client registration
+ * (used for re-auth of tools with manually configured client credentials).
+ */
+export function clearOAuthTokens(toolName: string): void {
+  getDb()
+    .prepare(`
+      UPDATE oauth_state SET
+        access_token = NULL, access_token_iv = NULL, access_token_tag = NULL,
+        refresh_token = NULL, refresh_token_iv = NULL, refresh_token_tag = NULL,
+        expiry_date = NULL, code_verifier = NULL,
+        updated_at = unixepoch()
+      WHERE tool_name = ?
+    `)
+    .run(toolName);
 }
 
 /**

@@ -14,6 +14,7 @@ import {
   savePendingOAuthState,
   findAndDeletePendingOAuthState,
   clearOAuthState,
+  clearOAuthTokens,
 } from "../sessions.js";
 
 /**
@@ -59,12 +60,14 @@ export class MCPOAuthProvider implements OAuthClientProvider {
   }
 
   get clientMetadata(): OAuthClientMetadata {
+    // Public/PKCE-only clients register with "none"; confidential clients use a secret.
+    const isPublic = !!getOAuthState(this.toolName)?.oauth_public;
     return {
       redirect_uris: [this.redirectUri],
       client_name: `Slackode (${this.toolName})`,
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
-      token_endpoint_auth_method: "client_secret_post",
+      token_endpoint_auth_method: isPublic ? "none" : "client_secret_post",
     };
   }
 
@@ -72,21 +75,30 @@ export class MCPOAuthProvider implements OAuthClientProvider {
     const row = getOAuthState(this.toolName);
     if (!row?.client_id) return undefined;
 
+    // A public client (or any client with no secret) authenticates via PKCE only;
+    // advertise "none" so the SDK never tries to send a client secret.
+    const isPublic = !!row.oauth_public || !row.client_secret;
     return {
       client_id: row.client_id,
       client_secret: row.client_secret ?? undefined,
       client_id_issued_at: row.client_id_issued_at ?? undefined,
       client_secret_expires_at: row.client_secret_expires_at ?? undefined,
+      token_endpoint_auth_method: isPublic ? "none" : "client_secret_post",
     };
   }
 
   async saveClientInformation(info: OAuthClientInformationMixed): Promise<void> {
+    const clientSecret = "client_secret" in info ? (info.client_secret as string) : null;
+    // A registration that returns no secret is a public/PKCE client — or preserve
+    // an explicit public flag set before DCR.
+    const isPublic = !clientSecret || !!getOAuthState(this.toolName)?.oauth_public;
     upsertOAuthClientInfo(this.toolName, {
       clientId: info.client_id,
-      clientSecret: "client_secret" in info ? (info.client_secret as string) : null,
+      clientSecret,
       clientIdIssuedAt: "client_id_issued_at" in info ? (info.client_id_issued_at as number) : null,
       clientSecretExpiresAt:
         "client_secret_expires_at" in info ? (info.client_secret_expires_at as number) : null,
+      isPublic,
     });
   }
 
@@ -172,7 +184,16 @@ export class MCPOAuthProvider implements OAuthClientProvider {
     scope: "all" | "client" | "tokens" | "verifier" | "discovery",
   ): Promise<void> {
     if (scope === "all") {
-      clearOAuthState(this.toolName);
+      // Preserve manually configured client credentials — only DCR-registered
+      // clients should be discarded for re-registration.
+      const row = getOAuthState(this.toolName);
+      if (row?.client_manual) {
+        clearOAuthTokens(this.toolName);
+      } else {
+        clearOAuthState(this.toolName);
+      }
+    } else if (scope === "tokens") {
+      clearOAuthTokens(this.toolName);
     }
   }
 

@@ -51,9 +51,23 @@ export function getDb(): Database.Database {
         refresh_token_tag TEXT,
         expiry_date INTEGER,
         code_verifier TEXT,
+        client_manual INTEGER NOT NULL DEFAULT 0,
+        oauth_public INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    try {
+      db.exec(`ALTER TABLE oauth_state ADD COLUMN client_manual INTEGER NOT NULL DEFAULT 0`);
+    } catch {
+      // Column already exists — ignore.
+    }
+    // oauth_public: 1 = public/PKCE-only client (no client secret). Registers via
+    // DCR with token_endpoint_auth_method "none" and authenticates with PKCE only.
+    try {
+      db.exec(`ALTER TABLE oauth_state ADD COLUMN oauth_public INTEGER NOT NULL DEFAULT 0`);
+    } catch {
+      // Column already exists — ignore.
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS oauth_pending_states (
         state TEXT PRIMARY KEY,
