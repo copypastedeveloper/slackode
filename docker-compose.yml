@@ -13,6 +13,9 @@ services:
       - TOOLS_SEED_PATH=/app/tools.json
       - KNOWLEDGE_DIR=/app/knowledge
       - LANCE_DIR=/app/knowledge/.lancedb
+      # uv script environments contain native .so files (numpy etc.) and must
+      # live on an exec mount; the default ~/.cache location is noexec.
+      - UV_CACHE_DIR=/home/appuser/.local/share/uv/cache
       # S3 knowledge sync (optional — set in .env)
       # - KNOWLEDGE_BUCKET=
       # - KNOWLEDGE_ENDPOINT=

@@ -13,7 +13,7 @@
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
     "@lancedb/lancedb": "^0.27.1",
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@opencode-ai/sdk": "1.15.13",
     "@slack/bolt": "^4.6.0",
     "better-sqlite3": "^12.6.2",

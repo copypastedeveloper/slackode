@@ -3,7 +3,11 @@ FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
-RUN npm audit --omit=dev
+# Strict production audit gate with an explicit allowlist (scripts/audit-check.mjs):
+# fails on ANY prod advisory except knowingly-accepted GHSA ids documented there
+# (currently only sharp<0.35 via @huggingface/transformers, which has no in-range fix).
+COPY scripts/audit-check.mjs scripts/audit-check.mjs
+RUN node scripts/audit-check.mjs
 COPY tsconfig.json ./
 COPY src/ src/
 RUN npm run build
