@@ -51,6 +51,43 @@ function contextFilesExist(repoDir: string): boolean {
   return CONTEXT_FILE_NAMES.every((f) => existsSync(path.join(repoDir, f)));
 }
 
+// The generation prompts ask for 80-250 lines per file, but the agent drifts:
+// observed in prod, repeated incremental rewrites grew conventions.md to 171KB
+// (~43k tokens injected into every prompt). Enforce the cap mechanically.
+const MAX_CONTEXT_FILE_LINES = 250;
+const MAX_CONTEXT_FILE_BYTES = 32 * 1024;
+
+/**
+ * Hard-cap each context file's size after generation. The truncation marker
+ * tells the next incremental run the file was cut so it rewrites it shorter.
+ */
+function enforceContextFileCaps(repoDir: string): void {
+  for (const f of CONTEXT_FILE_NAMES) {
+    const fullPath = path.join(repoDir, f);
+    if (!existsSync(fullPath)) continue;
+    let content: string;
+    try {
+      content = readFileSync(fullPath, "utf-8");
+    } catch {
+      continue;
+    }
+    const lines = content.split("\n");
+    const overLines = lines.length > MAX_CONTEXT_FILE_LINES;
+    const overBytes = Buffer.byteLength(content, "utf-8") > MAX_CONTEXT_FILE_BYTES;
+    if (!overLines && !overBytes) continue;
+
+    let truncated = lines.slice(0, MAX_CONTEXT_FILE_LINES).join("\n");
+    while (Buffer.byteLength(truncated, "utf-8") > MAX_CONTEXT_FILE_BYTES) {
+      truncated = truncated.slice(0, Math.floor(truncated.length * 0.9));
+    }
+    truncated += "\n\n<!-- TRUNCATED by context-gen size cap: rewrite this file shorter on the next update. -->\n";
+    writeFileSync(fullPath, truncated, "utf-8");
+    console.warn(
+      `[context-gen] ${f} exceeded size cap (${lines.length} lines, ${Buffer.byteLength(content, "utf-8")} bytes) — truncated.`,
+    );
+  }
+}
+
 /**
  * Get the git log and diffstat between two SHAs.
  */
@@ -260,8 +297,15 @@ export async function generateContext(repoDir: string, repoName: string): Promis
 
   // Wait for completion
   let done = false;
+  let timedOut = false;
   const TIMEOUT_MS = 15 * 60 * 1000;
-  const timeout = setTimeout(() => { done = true; }, TIMEOUT_MS);
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    done = true;
+    // Force the `for await` out of a blocked stream.next() — without this the
+    // timeout flag is only noticed on the next SSE event, which may never come.
+    try { void stream.return(undefined); } catch { /* already closed */ }
+  }, TIMEOUT_MS);
 
   try {
     for await (const event of stream) {
@@ -296,7 +340,17 @@ export async function generateContext(repoDir: string, repoName: string): Promis
     stream.return(undefined);
   }
 
-  // Save the SHA so the next run knows where to diff from
+  // Only advance the SHA on verified success — a timed-out or fileless run
+  // previously still saved it, silently skipping those commits forever.
+  if (timedOut) {
+    console.warn(`[context-gen] Timed out after ${TIMEOUT_MS / 60000} min (${mode}) — SHA not advanced; will retry next cycle.`);
+    return;
+  }
+  if (!contextFilesExist(repoDir)) {
+    console.warn(`[context-gen] Generation finished but context files are missing (${mode}) — SHA not advanced; will retry next cycle.`);
+    return;
+  }
+  enforceContextFileCaps(repoDir);
   saveContextSha(repoDir, currentSha);
   console.log(`[context-gen] Context generation complete (${mode}, sha: ${currentSha.slice(0, 8)}).`);
 }
