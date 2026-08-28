@@ -1,6 +1,7 @@
 import bolt from "@slack/bolt";
 const { App } = bolt;
-import { initOpencode } from "./opencode.js";
+import { initOpencode, abortSessionServerSide } from "./opencode.js";
+import { getRun } from "./run-registry.js";
 import { closeDb, seedToolsFromFile, bootstrapAdmins, hasRole } from "./sessions.js";
 import { writeOpencodeConfig } from "./opencode-config.js";
 import { setRepoDir, startServer, stopServer, restartServer } from "./opencode-server.js";
@@ -17,7 +18,7 @@ import { handleDm } from "./handlers/dm.js";
 import { handleStatus, handlePR, handleCancel } from "./handlers/code-commands.js";
 import { resumeCodingWithAgent, resumeCodingWithRepo, handleApprove, handleRevise, resumeCodingAfterPATConnect } from "./handlers/coding-handler.js";
 import { validateAndStoreGithubPAT } from "./handlers/github-commands.js";
-import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, GITHUB_CONNECT_MODAL_CALLBACK, OAUTH_COMPLETE_MODAL_CALLBACK } from "./constants.js";
+import { Action, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, GITHUB_CONNECT_MODAL_CALLBACK, OAUTH_COMPLETE_MODAL_CALLBACK, TURN_EXTENSION_MS } from "./constants.js";
 import { completeOAuthExchange } from "./handlers/tool-commands.js";
 import {
   openConfigureModal, retryConfigureModal, saveConfigureSubmission, TOOL_CONFIGURE_MODAL_CALLBACK,
@@ -108,6 +109,52 @@ function registerProbationAction(actionId: string, handle: (runId: string) => Pr
     }
   });
 }
+// Long-running Q&A turn controls ("still working — keep going?").
+// Value = run key (channel:placeholderTs) into the in-memory run registry.
+app.action(Action.RUN_STOP, async ({ action, ack, body, client }) => {
+  await ack();
+  const runKey = (action as { value: string }).value;
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  const messageTs = (body as { message?: { ts: string } }).message?.ts;
+  const run = getRun(runKey);
+  if (!run) {
+    if (channel && messageTs) {
+      await client.chat.update({ channel, ts: messageTs, text: "_That run already finished._", blocks: [] }).catch(() => {});
+    }
+    return;
+  }
+  run.stopRequested = true;
+  run.controller.abort();
+  await abortSessionServerSide(run.sessionId);
+  if (channel && messageTs) {
+    await client.chat.update({ channel, ts: messageTs, text: "_Stopping..._", blocks: [] }).catch(() => {});
+  }
+});
+
+app.action(Action.RUN_KEEP_WAITING, async ({ action, ack, body, client }) => {
+  await ack();
+  const runKey = (action as { value: string }).value;
+  const channel = (body as { channel?: { id: string } }).channel?.id;
+  const messageTs = (body as { message?: { ts: string } }).message?.ts;
+  const run = getRun(runKey);
+  if (!run) {
+    if (channel && messageTs) {
+      await client.chat.update({ channel, ts: messageTs, text: "_That run already finished._", blocks: [] }).catch(() => {});
+    }
+    return;
+  }
+  run.extensions++;
+  run.budget.deadlineAt = Date.now() + TURN_EXTENSION_MS;
+  if (channel && messageTs) {
+    await client.chat.update({
+      channel,
+      ts: messageTs,
+      text: `_:+1: Keeping at it — up to ${Math.round(TURN_EXTENSION_MS / 60_000)} more minutes._`,
+      blocks: [],
+    }).catch(() => {});
+  }
+});
+
 registerProbationAction(Action.JOB_POST, (runId) => approveProbationRun(runId, app.client));
 registerProbationAction(Action.JOB_APPROVE, (runId) => approveProbationRunNoPost(runId));
 registerProbationAction(Action.JOB_NEEDS_WORK, rejectProbationRun);

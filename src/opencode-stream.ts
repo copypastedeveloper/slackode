@@ -28,6 +28,12 @@ export interface StreamAnswerOpts {
   onProgress?: ProgressCallback;
   /** Optional abort signal — when fired, the stream terminates and throws "Session aborted". */
   abortSignal?: AbortSignal;
+  /**
+   * Optional mutable deadline. When Date.now() passes budget.deadlineAt the turn
+   * terminates with reason "timeout". The caller may push deadlineAt later while
+   * the turn runs (the "keep waiting" button). Defaults to start + 10 minutes.
+   */
+  budget?: { deadlineAt: number };
 }
 
 /** Snapshot of everything the streaming loop observed, used by analytics + the empty-answer debug log. */
@@ -160,7 +166,12 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
     try { void stream.return(undefined); } catch { /* already closed */ }
   };
 
-  const timeout = setTimeout(() => terminate("timeout"), TIMEOUT_MS);
+  // Deadline is polled (not a one-shot timer) so the caller can extend
+  // budget.deadlineAt mid-turn ("keep waiting" button).
+  const budget = opts.budget ?? { deadlineAt: streamStartMs + TIMEOUT_MS };
+  const deadlineTimer = setInterval(() => {
+    if (Date.now() >= budget.deadlineAt) terminate("timeout");
+  }, 5_000);
   let idleTimer: ReturnType<typeof setTimeout> = setTimeout(() => terminate("idle"), IDLE_MS);
   const resetIdle = (): void => {
     clearTimeout(idleTimer);
@@ -291,7 +302,7 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
       }
     }
   } finally {
-    clearTimeout(timeout);
+    clearInterval(deadlineTimer);
     clearTimeout(idleTimer);
     if (postAnswerTimeout) clearTimeout(postAnswerTimeout);
     stream.return(undefined);

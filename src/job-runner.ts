@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync, existsSync } from "node:fs";
 import type { WebClient } from "@slack/web-api";
 import { getChannelTools, resolveJobAgent } from "./sessions.js";
-import { createSession, askQuestion } from "./opencode.js";
+import { createSession, askQuestion, abortSessionServerSide } from "./opencode.js";
 import { formatResponse } from "./utils/formatting.js";
 import { Action } from "./constants.js";
 import {
@@ -43,7 +43,13 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
     const question = buildRunPrompt(job, scratchDir, prevSnapshot);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), JOB_TIMEOUT_MS);
+    const timeout = setTimeout(() => {
+      controller.abort();
+      // The client-side abort only abandons our SSE stream — without a
+      // server-side abort the agent keeps running on the shared server
+      // (observed in prod: a hung watcher left a live session per run).
+      void abortSessionServerSide(sessionId);
+    }, JOB_TIMEOUT_MS);
     let text: string;
     try {
       // Jobs inherit the MCP tool access of the channel they post to.

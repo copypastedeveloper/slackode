@@ -22,7 +22,22 @@ export const Action = {
   JOB_APPROVE: "job_approve",
   JOB_NEEDS_WORK: "job_needs_work",
   JOB_PAUSE: "job_pause",
+  /** Long-running Q&A turn: keep waiting past the soft check. value = run key. */
+  RUN_KEEP_WAITING: "run_keep_waiting",
+  /** Long-running Q&A turn: stop the run. value = run key. */
+  RUN_STOP: "run_stop",
 } as const;
+
+// ── Long-running Q&A turn control ──
+
+/** Hard wall-clock cap per Q&A turn before the best-effort wrap-up kicks in. */
+export const TURN_HARD_CAP_MS = 10 * 60 * 1000;
+
+/** After this long, ask the user whether to keep waiting. */
+export const TURN_SLOW_CHECK_MS = 5 * 60 * 1000;
+
+/** Each "keep waiting" click extends the deadline by this much. */
+export const TURN_EXTENSION_MS = 10 * 60 * 1000;
 
 // ── Scheduled-job limits (apply to everyone, including developers) ──
 

@@ -6,8 +6,11 @@ import {
   getChannelConfig,
   getChannelAgent, getChannelTools, resolveAgent,
   isSessionCompacted, setSessionCompacted,
+  deleteSessionMapping,
   hasRole,
 } from "../sessions.js";
+import { registerRun, getRun, removeRun } from "../run-registry.js";
+import { Action, TURN_HARD_CAP_MS, TURN_SLOW_CHECK_MS } from "../constants.js";
 import { listJobs, getJobById, reassignJobOwner } from "../db/jobs.js";
 import { runJob } from "../job-runner.js";
 import { askQuestion, askForShorterResponse } from "../opencode.js";
@@ -436,6 +439,45 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
   // Set up throttled progress updates
   const progress = createProgressUpdater(client, channel, placeholderTs);
 
+  // Long-run controls: a mutable deadline the "keep waiting" button can extend,
+  // an abort controller the Stop button fires, and a slow-check message with
+  // both buttons posted once the turn passes TURN_SLOW_CHECK_MS.
+  const controller = new AbortController();
+  const budget = { deadlineAt: Date.now() + TURN_HARD_CAP_MS };
+  const runKey = `${channel}:${placeholderTs}`;
+  registerRun(runKey, { sessionId, controller, budget, stopRequested: false, extensions: 0 });
+
+  let slowCheckTs: string | undefined;
+  const slowCheckTimer = setTimeout(() => {
+    void (async () => {
+      try {
+        const posted = await client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: "Still working on this — it's a big one. Keep going?",
+          blocks: [
+            { type: "section", text: { type: "mrkdwn", text: ":hourglass_flowing_sand: _Still working on this — it's a big one. Keep going?_" } },
+            {
+              type: "actions",
+              elements: [
+                { type: "button", text: { type: "plain_text", text: "Keep going" }, style: "primary", action_id: Action.RUN_KEEP_WAITING, value: runKey },
+                { type: "button", text: { type: "plain_text", text: "Stop" }, action_id: Action.RUN_STOP, value: runKey },
+              ],
+            },
+          ],
+        });
+        slowCheckTs = posted.ts;
+        const run = getRun(runKey);
+        if (!run) {
+          // Turn finished while we were posting — clean up immediately.
+          if (posted.ts) await client.chat.delete({ channel, ts: posted.ts }).catch(() => {});
+        }
+      } catch (err) {
+        console.warn("[run-control] Failed to post slow-check message:", err);
+      }
+    })();
+  }, TURN_SLOW_CHECK_MS);
+
   const askOpts = {
     sessionId,
     question,
@@ -446,6 +488,9 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     tools,
     files,
     repo,
+    abortSignal: controller.signal,
+    budget,
+    salvageOnTimeout: true,
     analytics: {
       userId: slackCtx.userId,
       channelId: channel,
@@ -460,17 +505,43 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
 
   let result;
   try {
-    result = await askQuestion(askOpts);
-  } catch (err) {
-    // If the server is restarting (tool config change killed it mid-flight),
-    // wait for the restart to finish and retry once.
-    if (isRestarting()) {
-      progress.update("_Reconfiguring... I'll pick back up in a moment._");
-      await waitForRestart();
+    try {
       result = await askQuestion(askOpts);
-    } else {
-      throw err;
+    } catch (err) {
+      // User pressed Stop: the abort already reached the server; just confirm.
+      if (getRun(runKey)?.stopRequested && err instanceof Error && err.message === "Session aborted") {
+        progress.stop();
+        await client.chat.update({
+          channel,
+          ts: placeholderTs,
+          text: "_Stopped at your request._",
+        });
+        return;
+      }
+      // If the server is restarting (tool config change killed it mid-flight),
+      // wait for the restart to finish and retry once.
+      if (isRestarting()) {
+        progress.update("_Reconfiguring... I'll pick back up in a moment._");
+        await waitForRestart();
+        budget.deadlineAt = Date.now() + TURN_HARD_CAP_MS;
+        result = await askQuestion(askOpts);
+      } else {
+        throw err;
+      }
     }
+  } finally {
+    clearTimeout(slowCheckTimer);
+    removeRun(runKey);
+    if (slowCheckTs) {
+      await client.chat.delete({ channel, ts: slowCheckTs }).catch(() => {});
+    }
+  }
+
+  // Wedged session (never started the turn): retire the thread mapping so the
+  // next question gets a fresh session instead of piling up behind the zombie.
+  if (result.deadSession) {
+    deleteSessionMapping(threadTs);
+    console.warn(`[run-control] Retired wedged session mapping for thread ${threadTs} (session ${sessionId})`);
   }
 
   // If compaction occurred during this response, flag the session so the
@@ -481,9 +552,13 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
 
   progress.stop();
 
+  const rawMarkdown = result.capped
+    ? `:warning: _I hit my time limit before finishing the research, so this is my best answer from what I gathered — it may be incomplete._\n\n${result.text}`
+    : result.text;
+
   await safePostResponse({
     client, channel, threadTs, placeholderTs,
-    rawMarkdown: result.text,
+    rawMarkdown,
     sessionId,
   });
 

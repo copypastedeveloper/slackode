@@ -39,6 +39,20 @@ export function getBaseUrl(): string {
 }
 
 /**
+ * Best-effort server-side abort of a session's in-flight work. Without this,
+ * a client-side give-up (watchdog, job timeout, user Stop) leaves the agent
+ * running on the shared server — burning tokens and holding a live session
+ * (observed in prod: a hung watcher accumulated a session per run).
+ */
+export async function abortSessionServerSide(sessionId: string, activeClient?: OpencodeClient): Promise<void> {
+  try {
+    await (activeClient ?? getClient()).session.abort({ path: { id: sessionId } });
+  } catch (err) {
+    console.warn(`[opencode] Server-side abort failed for ${sessionId}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * Auto-allow a permission prompt so the session doesn't hang.
  * Shared by Q&A, context-gen, and coding session SSE loops.
  */
@@ -189,6 +203,14 @@ export interface AskResult {
   compacted: boolean;
   /** True when the session produced no real answer (watchdog bail-out or empty response) and `text` is a canned apology. */
   failed?: boolean;
+  /** True when the turn hit its time cap and `text` is a best-effort answer assembled from partial research. */
+  capped?: boolean;
+  /**
+   * True when the session never started the turn (zero step-starts) — the
+   * session is likely wedged; the caller should retire its thread mapping so
+   * the next question gets a fresh session.
+   */
+  deadSession?: boolean;
 }
 
 export interface AskQuestionOpts {
@@ -205,6 +227,14 @@ export interface AskQuestionOpts {
   customBaseUrl?: string;
   customContextPrefix?: string;
   abortSignal?: AbortSignal;
+  /** Mutable turn deadline (see StreamAnswerOpts.budget). Defaults to 10 minutes. */
+  budget?: { deadlineAt: number };
+  /**
+   * When the turn hits its deadline mid-work, ask the agent to answer with what
+   * it has gathered instead of discarding everything. Interactive Q&A wants
+   * this; unattended jobs must not post partial data, so it defaults to false.
+   */
+  salvageOnTimeout?: boolean;
   /** Analytics context — when supplied, the turn is recorded to the `turns` table. */
   analytics?: {
     userId: string;
@@ -214,10 +244,53 @@ export interface AskQuestionOpts {
   };
 }
 
+/**
+ * After a capped turn is aborted, ask the same session to answer with whatever
+ * it has gathered — no more tool calls, short deadline. The session retains the
+ * full research context, so this recovers most of the value of a turn that ran
+ * out of time (observed in prod: capped turns routinely completed fine answers
+ * minutes after the watchdog discarded them). Returns "" on any failure.
+ */
+async function salvageBestEffortAnswer(
+  activeClient: OpencodeClient,
+  activeBaseUrl: string,
+  sessionId: string,
+  agent?: string,
+): Promise<string> {
+  const SALVAGE_TIMEOUT_MS = 2 * 60 * 1000;
+  try {
+    const { sseClient, stream: eventStream } = await openStream(activeBaseUrl);
+    await activeClient.session.promptAsync({
+      path: { id: sessionId },
+      body: {
+        ...(agent ? { agent } : {}),
+        parts: [{
+          type: "text",
+          text:
+            "You have run out of time for this task. Do NOT use any more tools. " +
+            "Using only the information you have already gathered, give your best direct answer " +
+            "to the original question now. If parts are unverified or missing, say so briefly at the end.",
+        }],
+      },
+    });
+    const result = await streamAnswer({
+      sessionId,
+      sseClient,
+      stream: eventStream,
+      budget: { deadlineAt: Date.now() + SALVAGE_TIMEOUT_MS },
+    });
+    return result.text.trim();
+  } catch (err) {
+    console.warn(`[opencode] Best-effort salvage failed for ${sessionId}:`, err instanceof Error ? err.message : err);
+    return "";
+  }
+}
+
 export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   const {
     sessionId, question, ctx, onProgress, isNewSession, agent, tools, files, repo,
     customClient, customBaseUrl, customContextPrefix, abortSignal, analytics,
+    budget, salvageOnTimeout,
   } = opts;
 
   const activeClient = customClient ?? getClient();
@@ -257,6 +330,7 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
       stream: eventStream,
       onProgress,
       abortSignal,
+      budget,
     });
   } catch (err) {
     // streamAnswer throws only on abortSignal — record the turn as aborted, then re-raise.
@@ -299,13 +373,48 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
       reason: stream.diag.terminateReason,
       ...stream.diag,
     }));
+
+    // Stop whatever the server is still doing for this turn — otherwise the
+    // agent keeps working (and billing) after we've given up on it.
+    await abortSessionServerSide(sessionId, activeClient);
+
+    const wasActive = stream.diag.stepStarts > 0;
+
+    // Hit the cap while actively working: don't discard the research — ask the
+    // agent to answer with what it has. The caller flags the answer as partial.
+    if (wasActive && stream.diag.terminateReason === "timeout" && salvageOnTimeout) {
+      const salvaged = await salvageBestEffortAnswer(activeClient, activeBaseUrl, sessionId, agent);
+      if (salvaged) {
+        recordTurnIfRequested(analytics, {
+          ...baseTurn,
+          outcome: "timeout",
+          outcomeDetail: "watchdog: timeout (salvaged best-effort answer)",
+          responseChars: salvaged.length,
+        });
+        return { text: salvaged, isQuestion: false, compacted: false, capped: true };
+      }
+    }
+
     recordTurnIfRequested(analytics, {
       ...baseTurn,
       outcome: stream.diag.terminateReason === "timeout" ? "timeout" : "error",
       outcomeDetail: `watchdog: ${stream.diag.terminateReason}`,
     });
+
+    if (!wasActive) {
+      // Zero step-starts: the session never began the turn. This is the wedged-
+      // session signature — tell the caller to retire the thread mapping.
+      return {
+        text: "Sorry — the assistant backend never started on that one. I've reset this conversation; please ask again.",
+        isQuestion: false,
+        compacted: false,
+        failed: true,
+        deadSession: true,
+      };
+    }
+    const minutes = Math.round(stream.diag.durationMs / 60_000);
     return {
-      text: "Sorry — that took too long and I had to give up (the assistant backend stopped responding). Please try again.",
+      text: `Sorry — I ran out of time (${minutes} min) before finishing. Please try again, or narrow the question.`,
       isQuestion: false,
       compacted: false,
       failed: true,

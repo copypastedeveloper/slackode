@@ -30,6 +30,15 @@ export function setSessionCompacted(threadKey: string, compacted: boolean): void
 }
 
 /**
+ * Drop the thread→session mapping so the next question in the thread gets a
+ * fresh OpenCode session. Used when a session is wedged (accepts prompts but
+ * never starts a turn) — the mapping is the only recovery lever we have.
+ */
+export function deleteSessionMapping(threadKey: string): void {
+  getDb().prepare("DELETE FROM sessions WHERE thread_key = ?").run(threadKey);
+}
+
+/**
  * Get an existing session or create a new one.
  * Returns isNew so the caller can include full context in the first message.
  */
