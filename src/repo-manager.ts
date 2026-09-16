@@ -180,6 +180,15 @@ export async function initRepos(): Promise<void> {
     console.log(`[repo-manager] Seeded default repo: ${name}`);
   }
 
+  // The default repo's directory is env-driven (REPO_DIR). A row written by an
+  // older deployment may still point at the previous location (the EFS mount at
+  // /app/repo) — re-point it so context-gen and channel routing follow the env.
+  const def = getDefaultRepo();
+  if (def && def.dir !== DEFAULT_REPO_DIR) {
+    upsertRepo(def.name, def.url, DEFAULT_REPO_DIR, true);
+    console.log(`[repo-manager] Default repo ${def.name} dir updated: ${def.dir} -> ${DEFAULT_REPO_DIR}`);
+  }
+
   // Ensure all enabled repos are cloned
   for (const repo of getEnabledRepos()) {
     if (!existsSync(path.join(repo.dir, ".git"))) {
