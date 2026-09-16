@@ -16,6 +16,13 @@ const ALLOW = new Map([
       "for image preprocessing (we use text embeddings). Drop when transformers " +
       "allows sharp>=0.35 or an override is validated.",
   ],
+  [
+    "GHSA-rgj7-g3m4-5g8c",
+    "sharp<=0.35.4 libheif CVEs (GHSA-g89c-p67h-r497, GHSA-2jg2-4ch7-h545). Same " +
+      "situation as above: pinned by @huggingface/transformers, sharp is only " +
+      "reachable via image preprocessing we never invoke (text embeddings only). " +
+      "Drop together with the entry above.",
+  ],
 ]);
 
 function runAudit() {
