@@ -12,6 +12,31 @@ export interface SlackMessagePayload {
   blocks: KnownBlock[];
 }
 
+/**
+ * Slack rejects a TableBlock whose rows have different cell counts
+ * (`uneven_table_rows_not_allowed`), and markdown-to-slack-blocks passes
+ * ragged markdown tables through as-is. Pad every row to the widest row so
+ * nothing the model wrote is dropped.
+ */
+function normalizeTables(blocks: KnownBlock[]): KnownBlock[] {
+  for (const block of blocks) {
+    if (block.type !== "table") continue;
+    const rows = (block as unknown as { rows?: unknown[][] }).rows;
+    if (!rows?.length) continue;
+    const width = Math.max(...rows.map((r) => r.length));
+    for (const row of rows) {
+      // Must be rich_text: the library's plain-text renderer assumes every cell has `elements`.
+      while (row.length < width) {
+        row.push({
+          type: "rich_text",
+          elements: [{ type: "rich_text_section", elements: [{ type: "text", text: " " }] }],
+        });
+      }
+    }
+  }
+  return blocks;
+}
+
 function capText(text: string): string {
   if (text.length <= MAX_TEXT_LENGTH) return text;
   return text.slice(0, MAX_TEXT_LENGTH - 3) + "...";
@@ -26,8 +51,8 @@ function capText(text: string): string {
  * we do a second pass to ensure no message contains more than one table.
  */
 export function formatResponse(markdown: string): SlackMessagePayload[] {
-  const blocks = markdownToBlocks(markdown);
-  const messages = splitBlocksWithText(blocks);
+  const blocks = normalizeTables(markdownToBlocks(markdown) as unknown as KnownBlock[]);
+  const messages = splitBlocksWithText(blocks as never[]);
 
   // Second pass: split any message that still has multiple tables
   const result: SlackMessagePayload[] = [];

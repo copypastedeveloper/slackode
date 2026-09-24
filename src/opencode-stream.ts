@@ -56,6 +56,12 @@ export interface StreamDiag {
   lastAssistantMessageId: string | null;
   answerCaptured: boolean;
   skipNextStop: boolean;
+  /** Ms from stream open to the first step-start (queueing + first model request latency). */
+  firstStepMs: number | null;
+  /** Wall time of each step, step-start to step-finish. Includes tool execution inside the step. */
+  stepDurationsMs: number[];
+  /** Per-call tool timings, from OpenCode's own tool state timestamps. */
+  toolTimings: ToolTiming[];
 }
 
 /** Summed token counts + cost across all step-finish events in this turn. */
@@ -83,10 +89,66 @@ export interface StreamResult {
   usage: UsageTotals;
 }
 
+/**
+ * The SDK's ToolState union discriminates on `status`; `type` is kept as a
+ * fallback in case an older server build sends that instead.
+ */
 function getToolStateType(part: { state?: unknown }): string | undefined {
-  return part.state && typeof part.state === "object" && "type" in part.state
-    ? (part.state as { type: string }).type
-    : undefined;
+  if (!part.state || typeof part.state !== "object") return undefined;
+  const s = part.state as { status?: string; type?: string };
+  return s.status ?? s.type;
+}
+
+function getToolTime(part: { state?: unknown }): { start?: number; end?: number } {
+  return (part.state as { time?: { start?: number; end?: number } } | undefined)?.time ?? {};
+}
+
+export interface ToolTiming { tool: string; ms: number; status: string; start: number; end: number }
+
+/** Total wall time covered by a set of possibly-overlapping intervals (parallel tool calls). */
+function unionMs(intervals: Array<{ start: number; end: number }>): number {
+  const sorted = [...intervals].sort((a, b) => a.start - b.start);
+  let total = 0;
+  let curStart = -1;
+  let curEnd = -1;
+  for (const { start, end } of sorted) {
+    if (start > curEnd) {
+      if (curEnd > curStart) total += curEnd - curStart;
+      curStart = start;
+      curEnd = end;
+    } else if (end > curEnd) {
+      curEnd = end;
+    }
+  }
+  if (curEnd > curStart) total += curEnd - curStart;
+  return total;
+}
+
+const secs = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
+
+/**
+ * One grep-able line per turn splitting wall time into model vs tool time.
+ * Model time = step time minus the union of tool intervals (tools run inside steps,
+ * possibly in parallel). Example:
+ *   [timing] ses_x total=41.2s first_step=2.3s steps=6 model=28.4s tools=11.9s/9 slowest=[linear_search 6.1s, grep 2.0s, read 1.1s]
+ */
+export function logTiming(sessionId: string, diag: StreamDiag): void {
+  const stepMs = diag.stepDurationsMs.reduce((a, b) => a + b, 0);
+  const toolMs = unionMs(diag.toolTimings);
+  const modelMs = Math.max(0, stepMs - toolMs);
+  const slowest = [...diag.toolTimings]
+    .sort((a, b) => b.ms - a.ms)
+    .slice(0, 5)
+    .map((t) => `${t.tool}${t.status === "error" ? "!" : ""} ${secs(t.ms)}`)
+    .join(", ");
+  console.log(
+    `[timing] ${sessionId} total=${secs(diag.durationMs)}` +
+    ` first_step=${diag.firstStepMs === null ? "-" : secs(diag.firstStepMs)}` +
+    ` steps=${diag.stepDurationsMs.length} model=${secs(modelMs)}` +
+    ` tools=${secs(toolMs)}/${diag.toolTimings.length}` +
+    (slowest ? ` slowest=[${slowest}]` : "") +
+    (diag.stepDurationsMs.length ? ` per_step=[${diag.stepDurationsMs.map(secs).join(" ")}]` : ""),
+  );
 }
 
 /**
@@ -153,7 +215,12 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
     lastAssistantMessageId: null,
     answerCaptured: false,
     skipNextStop: false,
+    firstStepMs: null,
+    stepDurationsMs: [],
+    toolTimings: [],
   };
+  let stepStartedAt: number | undefined;
+  const toolTimed = new Set<string>();
   const bumpPart = (t: string): void => { diag.partCounts[t] = (diag.partCounts[t] ?? 0) + 1; };
 
   const TIMEOUT_MS = 10 * 60 * 1000;
@@ -213,6 +280,8 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
         if (part.type === "step-start") {
           assistantMessageId = (part as { messageID?: string }).messageID;
           diag.stepStarts++;
+          stepStartedAt = Date.now();
+          if (diag.firstStepMs === null) diag.firstStepMs = stepStartedAt - streamStartMs;
         } else if (part.type === "text") {
           const partMessageId = (part as { messageID?: string }).messageID;
           if (!userMessageId) {
@@ -248,6 +317,12 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
             if (stateType === "completed") diag.toolsCompleted++;
             else diag.toolsErrored++;
             activeTools.delete(part.callID);
+            // Parts re-emit on every update; record each call once.
+            const { start, end } = getToolTime(part);
+            if (start && end && !toolTimed.has(part.callID)) {
+              toolTimed.add(part.callID);
+              diag.toolTimings.push({ tool: part.tool, ms: end - start, status: stateType, start, end });
+            }
           }
         } else if (part.type === "compaction") {
           console.log(`[opencode] Compaction event for session ${sessionId}`);
@@ -260,6 +335,10 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
         } else if (part.type === "step-finish") {
           const reason = (part as { reason?: string }).reason;
           diag.stepFinishReasons.push(reason ?? "(none)");
+          if (stepStartedAt !== undefined) {
+            diag.stepDurationsMs.push(Date.now() - stepStartedAt);
+            stepStartedAt = undefined;
+          }
           // Accumulate cost + tokens from this step. Best-effort: some providers/versions
           // omit these fields; missing values stay at 0 in the totals.
           const usagePart = part as {
@@ -312,6 +391,8 @@ export async function streamAnswer(opts: StreamAnswerOpts): Promise<StreamResult
   diag.lastAssistantMessageId = assistantMessageId ?? null;
   diag.answerCaptured = answerCaptured;
   diag.skipNextStop = skipNextStop;
+
+  logTiming(sessionId, diag);
 
   if (abortSignal?.aborted) {
     diag.abortReceived = true;
