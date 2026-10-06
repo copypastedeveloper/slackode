@@ -211,6 +211,7 @@ function buildRunPrompt(job: JobRow, scratchDir: string, prevSnapshot?: string):
     [
       "Put the Slack message inside a fenced block tagged `post`. ONLY the contents of that block are posted to Slack — any text outside it (your progress notes or narration like 'Now composing the post:') is discarded, so you may think out loud freely outside the block. Do not put a label, heading, or preamble INSIDE the block; its first line is the first line people see in Slack.",
       "Format exactly like this:\n```post\nYour Slack message here, in markdown.\n```",
+      "Tables render as native Slack tables only when standalone: blank line before and after, never inside a list item.",
       watcher
         ? "Include the `post` block only if something warrants attention. If nothing does, write the single word NO_POST with no post block — silence is the expected outcome most runs."
         : "Always include the `post` block.",
