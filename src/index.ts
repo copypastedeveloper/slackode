@@ -11,6 +11,9 @@ import {
 } from "./coding-session.js";
 import { startPeriodicTokenRefresh, stopPeriodicTokenRefresh } from "./mcp/oauth-refresh.js";
 import { startPeriodicGDocsSync, stopPeriodicGDocsSync } from "./gdocs-sync.js";
+import {
+  restoreOpencodeDb, startPeriodicOpencodeDbSnapshot, stopPeriodicOpencodeDbSnapshot, finalSnapshotOpencodeDb,
+} from "./opencode-db-sync.js";
 import { startScheduler, stopScheduler } from "./scheduler.js";
 import { approveProbationRun, approveProbationRunNoPost, rejectProbationRun, pauseJobFromRun } from "./job-runner.js";
 import { handleMention } from "./handlers/mention.js";
@@ -426,8 +429,10 @@ async function start(): Promise<void> {
   setRepoDir(REPO_DIR);
   await writeOpencodeConfig(REPO_DIR);
 
-  // 3. Start OpenCode server and wait for health
+  // 3. Restore opencode's DB to local disk, then start the server and wait for health
+  restoreOpencodeDb();
   await startServer();
+  startPeriodicOpencodeDbSnapshot();
 
   // 3b. Start periodic OAuth token refresh
   startPeriodicTokenRefresh();
@@ -477,9 +482,11 @@ async function shutdown(signal: string): Promise<void> {
   try { stopScheduler(); } catch (e) { console.warn("[shutdown] stopScheduler:", e); }
   try { stopPeriodicTokenRefresh(); } catch (e) { console.warn("[shutdown] stopPeriodicTokenRefresh:", e); }
   try { stopPeriodicGDocsSync(); } catch (e) { console.warn("[shutdown] stopPeriodicGDocsSync:", e); }
+  try { stopPeriodicOpencodeDbSnapshot(); } catch (e) { console.warn("[shutdown] stopPeriodicOpencodeDbSnapshot:", e); }
   try { await destroyAllCodingSessions(); } catch (e) { console.warn("[shutdown] destroyAllCodingSessions:", e); }
   console.log("[shutdown] stopping opencode server");
   try { await stopServer(); } catch (e) { console.warn("[shutdown] stopServer:", e); }
+  try { await finalSnapshotOpencodeDb(); } catch (e) { console.warn("[shutdown] finalSnapshotOpencodeDb:", e); }
   try { closeDb(); } catch (e) { console.warn("[shutdown] closeDb:", e); }
   console.log("[shutdown] done — exiting");
   process.exit(0);

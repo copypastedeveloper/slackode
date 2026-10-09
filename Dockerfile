@@ -42,8 +42,11 @@ COPY .opencode/ .opencode/
 RUN chmod +x entrypoint.sh
 
 # Create directories the app needs and give appuser ownership
-RUN mkdir -p /app/repo /app/repos /app/knowledge /home/appuser/.local/share/opencode \
+RUN mkdir -p /app/repo /app/repos /app/knowledge /app/opencode-data /home/appuser/.local/share/opencode \
     && chown -R appuser:appuser /app /home/appuser
+
+# opencode's SQLite DB runs on local disk; EFS holds periodic snapshots (src/opencode-db-sync.ts)
+ENV OPENCODE_DB_LOCAL=/app/opencode-data/opencode.db
 
 # Pre-download the embedding model so there's no first-use latency
 ENV HF_CACHE_DIR=/home/appuser/.local/share/opencode/huggingface

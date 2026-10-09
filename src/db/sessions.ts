@@ -1,5 +1,5 @@
 import { getDb } from "./index.js";
-import { createSession } from "../opencode.js";
+import { createSession, sessionExists } from "../opencode.js";
 
 export function getSessionId(threadKey: string): string | undefined {
   const row = getDb()
@@ -48,7 +48,10 @@ export async function getOrCreateSession(
 ): Promise<{ sessionId: string; isNew: boolean }> {
   const existing = getSessionId(threadKey);
   if (existing) {
-    return { sessionId: existing, isNew: false };
+    if (await sessionExists(existing)) {
+      return { sessionId: existing, isNew: false };
+    }
+    console.warn(`[sessions] Session ${existing} for thread ${threadKey} no longer exists in OpenCode; starting a fresh one.`);
   }
 
   const sessionId = await createSession(`Slack thread: ${threadKey}`);

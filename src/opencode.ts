@@ -89,6 +89,20 @@ export async function createSession(title: string, directory?: string): Promise<
   return result.data.id;
 }
 
+/**
+ * False only when OpenCode positively reports the session as gone (404) — e.g.
+ * its DB was restored from a snapshot older than the session. Errors of any
+ * other kind count as "exists" so a blip never discards a live thread.
+ */
+export async function sessionExists(sessionId: string): Promise<boolean> {
+  try {
+    const result = await getClient().session.get({ path: { id: sessionId } });
+    return result.response?.status !== 404;
+  } catch {
+    return true;
+  }
+}
+
 // ── Context prefix thin wrappers ──
 
 export function buildContextPrefix(
