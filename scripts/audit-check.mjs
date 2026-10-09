@@ -23,6 +23,17 @@ const ALLOW = new Map([
       "reachable via image preprocessing we never invoke (text embeddings only). " +
       "Drop together with the entry above.",
   ],
+  [
+    "GHSA-wq5f-xc86-pv6w",
+    "sharp librsvg CVE-2026-96889. Same pin via @huggingface/transformers as the " +
+      "entries above; we never rasterize SVGs (text embeddings only). Drop with them.",
+  ],
+  [
+    "GHSA-hp3w-g68c-fv3c",
+    "sprintf-js DoS via unbounded precision specifiers; no fixed release exists " +
+      "(1.1.3 is latest). Only reachable via onnxruntime-node > global-agent > roarr " +
+      "logging with fixed format strings, never user input. Drop when a fix ships.",
+  ],
 ]);
 
 function runAudit() {
