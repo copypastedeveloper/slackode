@@ -79,6 +79,31 @@ function tryRestore(source: string, withWal: boolean): boolean {
   }
 }
 
+/** Last write time of a DB, counting its WAL (where a live opencode's recent writes sit). */
+function lastWriteMs(path: string): number {
+  let latest = -1;
+  for (const p of [path, `${path}-wal`]) {
+    try {
+      latest = Math.max(latest, statSync(p).mtimeMs);
+    } catch {
+      // missing file
+    }
+  }
+  return existsSync(path) ? latest : -1;
+}
+
+function newerSource(): string | undefined {
+  const snapshot = lastWriteMs(SNAPSHOT_DB);
+  const legacy = lastWriteMs(LEGACY_DB);
+  if (snapshot < 0 && legacy < 0) return undefined;
+  const source = legacy > snapshot ? LEGACY_DB : SNAPSHOT_DB;
+  console.log(
+    `[opencode-db] Last writes: snapshot=${snapshot < 0 ? "none" : new Date(snapshot).toISOString()}, ` +
+    `legacy=${legacy < 0 ? "none" : new Date(legacy).toISOString()}; restoring from ${source}.`,
+  );
+  return source;
+}
+
 /**
  * Restore the local opencode DB from EFS and point opencode at it via
  * OPENCODE_DB. Must run before the OpenCode server starts. Never throws: on
@@ -95,10 +120,13 @@ export function restoreOpencodeDb(): void {
     return;
   }
 
-  // Prefer our own snapshot. Fall back to the legacy live DB once, for the
-  // migration off EFS — it may still be written by an old task during a
-  // rolling deploy, so the copy is checked and retried.
-  const source = existsSync(SNAPSHOT_DB) ? SNAPSHOT_DB : existsSync(LEGACY_DB) ? LEGACY_DB : undefined;
+  // Restore from whichever copy was written last. Normally that's our
+  // snapshot, but if an older image ran in between it wrote the legacy DB
+  // directly (2026-10-16: a Terraform apply rolled prod back to 1.8.14 for
+  // days), and always preferring the snapshot would discard that history.
+  // The legacy DB may still be written by an old task during a rolling
+  // deploy, so the copy is checked and retried.
+  const source = newerSource();
   if (!source) {
     console.log("[opencode-db] No EFS snapshot or legacy DB found; opencode will start with an empty DB.");
     return;
