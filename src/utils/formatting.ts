@@ -18,7 +18,7 @@ export interface SlackMessagePayload {
  * ragged markdown tables through as-is. Pad every row to the widest row so
  * nothing the model wrote is dropped.
  */
-function normalizeTables(blocks: KnownBlock[]): KnownBlock[] {
+function padTableRows(blocks: KnownBlock[]): KnownBlock[] {
   for (const block of blocks) {
     if (block.type !== "table") continue;
     const rows = (block as unknown as { rows?: unknown[][] }).rows;
@@ -37,6 +37,54 @@ function normalizeTables(blocks: KnownBlock[]): KnownBlock[] {
   return blocks;
 }
 
+const FENCE_RE = /^\s*(```|~~~)/;
+const DELIMITER_RE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+function tableCellCount(line: string): number {
+  const inner = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return inner.split(/(?<!\\)\|/).length;
+}
+
+function isTableRow(line: string): boolean {
+  return line.includes("|") && line.trim() !== "";
+}
+
+function startsTable(lines: string[], i: number): boolean {
+  const header = lines[i];
+  const delimiter = lines[i + 1];
+  if (delimiter === undefined || !isTableRow(header) || !delimiter.includes("|")) return false;
+  return DELIMITER_RE.test(delimiter) && tableCellCount(header) === tableCellCount(delimiter);
+}
+
+/**
+ * Make every GFM table standalone so the markdown parser recognizes it.
+ *
+ * LLMs often put a table directly under a list item or heading with no blank
+ * line, or indent it inside a bullet. GFM treats those rows as paragraph
+ * continuation text, so the table is lost and Slack shows raw pipes. This
+ * dedents each table and surrounds it with blank lines. Fenced code blocks
+ * are left untouched.
+ */
+export function normalizeTables(markdown: string): string {
+  const lines = markdown.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (FENCE_RE.test(line)) inFence = !inFence;
+    if (inFence || !startsTable(lines, i)) {
+      out.push(line);
+      continue;
+    }
+    if (out.length > 0 && out[out.length - 1].trim() !== "") out.push("");
+    let j = i;
+    while (j < lines.length && isTableRow(lines[j])) out.push(lines[j++].trim());
+    if (j < lines.length && lines[j].trim() !== "") out.push("");
+    i = j - 1;
+  }
+  return out.join("\n");
+}
+
 function capText(text: string): string {
   if (text.length <= MAX_TEXT_LENGTH) return text;
   return text.slice(0, MAX_TEXT_LENGTH - 3) + "...";
@@ -51,7 +99,7 @@ function capText(text: string): string {
  * we do a second pass to ensure no message contains more than one table.
  */
 export function formatResponse(markdown: string): SlackMessagePayload[] {
-  const blocks = normalizeTables(markdownToBlocks(markdown) as unknown as KnownBlock[]);
+  const blocks = padTableRows(markdownToBlocks(normalizeTables(markdown)) as unknown as KnownBlock[]);
   const messages = splitBlocksWithText(blocks as never[]);
 
   // Second pass: split any message that still has multiple tables
@@ -105,7 +153,7 @@ export function formatResponse(markdown: string): SlackMessagePayload[] {
  * Used by progress.ts for streaming updates (no blocks needed).
  */
 export function markdownToPlainText(markdown: string): string {
-  const blocks = markdownToBlocks(markdown);
+  const blocks = markdownToBlocks(normalizeTables(markdown));
   return blocksToPlainText(blocks);
 }
 
