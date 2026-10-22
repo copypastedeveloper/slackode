@@ -274,19 +274,24 @@ async function salvageBestEffortAnswer(
   const SALVAGE_TIMEOUT_MS = 2 * 60 * 1000;
   try {
     const { sseClient, stream: eventStream } = await openStream(activeBaseUrl);
-    await activeClient.session.promptAsync({
-      path: { id: sessionId },
-      body: {
-        ...(agent ? { agent } : {}),
-        parts: [{
-          type: "text",
-          text:
-            "You have run out of time for this task. Do NOT use any more tools. " +
-            "Using only the information you have already gathered, give your best direct answer " +
-            "to the original question now. If parts are unverified or missing, say so briefly at the end.",
-        }],
-      },
-    });
+    try {
+      await activeClient.session.promptAsync({
+        path: { id: sessionId },
+        body: {
+          ...(agent ? { agent } : {}),
+          parts: [{
+            type: "text",
+            text:
+              "You have run out of time for this task. Do NOT use any more tools. " +
+              "Using only the information you have already gathered, give your best direct answer " +
+              "to the original question now. If parts are unverified or missing, say so briefly at the end.",
+          }],
+        },
+      });
+    } catch (err) {
+      await eventStream.return(undefined);
+      throw err;
+    }
     const result = await streamAnswer({
       sessionId,
       sseClient,
@@ -328,13 +333,18 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   // (user message creation, first step-start) can fire before we're listening.
   const { sseClient, stream: eventStream } = await openStream(activeBaseUrl);
 
-  await activeClient.session.promptAsync({
-    path: { id: sessionId },
-    body: {
-      ...(agent ? { agent } : {}),
-      parts,
-    },
-  });
+  try {
+    await activeClient.session.promptAsync({
+      path: { id: sessionId },
+      body: {
+        ...(agent ? { agent } : {}),
+        parts,
+      },
+    });
+  } catch (err) {
+    await eventStream.return(undefined);
+    throw err;
+  }
 
   let stream: Awaited<ReturnType<typeof streamAnswer>>;
   try {

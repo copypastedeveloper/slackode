@@ -8,14 +8,32 @@ export type ProgressCallback = (text: string) => void;
  * so they can subscribe BEFORE calling promptAsync — otherwise the first events
  * (message.updated role=user, first step-start) can fire before the subscription
  * lands and get dropped.
+ *
+ * Callers must end the stream with `stream.return()` (a `break` out of
+ * `for await` does this). The SDK's own return() only releases its reader lock
+ * and leaves the HTTP response open, so every finished turn leaked a
+ * connection to opencode that nobody read again. Its receive buffer filled
+ * with events until the host ran out of TCP memory (2026-09-30: 692
+ * connections, ~760MB). The returned stream aborts the request first, which
+ * closes the connection.
  */
 export async function openStream(baseUrl: string): Promise<{
   sseClient: OpencodeClient;
   stream: AsyncIterableIterator<Event> & { return: (value?: unknown) => Promise<IteratorResult<Event>> };
 }> {
   const sseClient = createOpencodeClient({ baseUrl });
-  const subscription = await sseClient.event.subscribe();
-  return { sseClient, stream: subscription.stream };
+  const controller = new AbortController();
+  const subscription = await sseClient.event.subscribe({ signal: controller.signal });
+  const inner = subscription.stream as AsyncGenerator<Event>;
+  const stream = {
+    next: () => inner.next(),
+    return: (value?: unknown) => {
+      controller.abort();
+      return inner.return(value as Event);
+    },
+    [Symbol.asyncIterator]() { return this; },
+  };
+  return { sseClient, stream };
 }
 
 export interface StreamAnswerOpts {

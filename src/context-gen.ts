@@ -1,11 +1,9 @@
-import {
-  createOpencodeClient,
-  type Event,
-} from "@opencode-ai/sdk";
+import type { Event } from "@opencode-ai/sdk";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { getClient, createSession, getBaseUrl, autoAllowPermission } from "./opencode.js";
+import { openStream } from "./opencode-stream.js";
 
 const CONTEXT_FILE_NAMES = [
   ".opencode/rules/repo-overview.md",
@@ -283,17 +281,20 @@ export async function generateContext(repoDir: string, repoName: string): Promis
   console.log(`[context-gen] Session created: ${sessionId}`);
 
   // Subscribe to SSE BEFORE sending the prompt
-  const sseClient = createOpencodeClient({ baseUrl: getBaseUrl() });
-  const subscription = await sseClient.event.subscribe();
-  const stream = subscription.stream;
+  const { sseClient, stream } = await openStream(getBaseUrl());
 
-  await getClient().session.promptAsync({
-    path: { id: sessionId },
-    body: {
-      agent: "context",
-      parts: [{ type: "text", text: prompt }],
-    },
-  });
+  try {
+    await getClient().session.promptAsync({
+      path: { id: sessionId },
+      body: {
+        agent: "context",
+        parts: [{ type: "text", text: prompt }],
+      },
+    });
+  } catch (err) {
+    await stream.return(undefined);
+    throw err;
+  }
 
   // Wait for completion
   let done = false;
