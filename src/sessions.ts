@@ -14,3 +14,4 @@ export * from "./db/memory.js";
 export * from "./db/github.js";
 export * from "./db/knowledge.js";
 export * from "./db/turns.js";
+export * from "./db/directory.js";

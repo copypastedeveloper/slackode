@@ -3,6 +3,8 @@ import type { WebClient } from "@slack/web-api";
 import { getChannelTools, resolveJobAgent } from "./sessions.js";
 import { createSession, askQuestion, abortSessionServerSide } from "./opencode.js";
 import { formatResponse } from "./utils/formatting.js";
+import { applyChannelMentionPolicy, type MentionContext } from "./slack-directory.js";
+import { buildLoopInBlock } from "./mentions.js";
 import { Action } from "./constants.js";
 import {
   type JobRow,
@@ -128,7 +130,12 @@ export async function runJob(job: JobRow, client: WebClient, opts: { manual?: bo
       parentTs = header.ts;
     }
 
-    parentTs = await postFormatted(client, target, post, probation ? parentTs : threadTs) ?? parentTs;
+    // Review drafts go to the owner's DM, where a tag would ping someone who
+    // isn't in the conversation — render mentions as names there.
+    const mentions: MentionContext = probation
+      ? { channelId: job.channel_id, mode: "off" }
+      : { channelId: job.channel_id, participants: [job.created_by] };
+    parentTs = await postFormatted(client, target, post, probation ? parentTs : threadTs, mentions) ?? parentTs;
 
     // Uploads are best-effort: a missing file or Slack scope must not kill the
     // run — the text content already posted, and the review buttons must follow.
@@ -272,10 +279,15 @@ export function parseRunOutput(text: string): { post: string; snapshotJson?: str
 
 /** Post markdown via the shared formatter; returns the ts of the first message. */
 async function postFormatted(
-  client: WebClient, channel: string, markdown: string, threadTs?: string,
+  client: WebClient, channel: string, markdown: string, threadTs: string | undefined,
+  mentions: MentionContext,
 ): Promise<string | undefined> {
   let firstTs: string | undefined;
-  for (const payload of formatResponse(markdown)) {
+  const policy = applyChannelMentionPolicy(markdown, mentions);
+  const payloads = formatResponse(policy.markdown);
+  const loopIn = buildLoopInBlock(policy.suggestions);
+  if (loopIn) payloads.push({ text: "", blocks: [loopIn] });
+  for (const payload of payloads) {
     const res = await client.chat.postMessage({
       channel,
       thread_ts: threadTs ?? firstTs,
@@ -323,7 +335,10 @@ export async function approveProbationRun(runId: string, client: WebClient): Pro
     return `:white_check_mark: Approved — \`${job.name}\` is live and will post to <#${job.channel_id}> whenever something warrants attention.`;
   }
 
-  const parentTs = await postFormatted(client, job.channel_id, run.post_markdown, job.thread_ts ?? undefined);
+  const parentTs = await postFormatted(
+    client, job.channel_id, run.post_markdown, job.thread_ts ?? undefined,
+    { channelId: job.channel_id, participants: [job.created_by] },
+  );
 
   // Re-share uploaded files via their permalinks (the original scratch files are gone).
   const fileIds: string[] = run.upload_file_ids ? JSON.parse(run.upload_file_ids) : [];

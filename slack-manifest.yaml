@@ -21,6 +21,8 @@ oauth_config:
       - im:write
       - im:history
       - users:read
+      - users:read.email
+      - usergroups:read
       - channels:read
       - channels:history
       - groups:read

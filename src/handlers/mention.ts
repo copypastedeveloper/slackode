@@ -23,6 +23,7 @@ export async function handleMention({ event, client, context }: MentionArgs): Pr
     eventTs: event.ts,
     isThread: !!event.thread_ts,
     botUserId,
+    fromBot: "bot_id" in event && !!(event as { bot_id?: string }).bot_id,
     client,
   });
 }

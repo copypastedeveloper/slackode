@@ -277,6 +277,44 @@ All channel configuration is done via `@bot config <command>`. Settings persist 
 @Slackode config clear agent
 ```
 
+**Mentions** — controls whether the bot may tag people, user groups, and other agents:
+```
+@Slackode config set mentions suggest   # default
+@Slackode config set mentions tag
+@Slackode config set mentions off
+@Slackode config get mentions
+@Slackode config clear mentions
+```
+
+| Mode | People in the thread | Anyone else / user groups |
+|------|----------------------|---------------------------|
+| `suggest` (default) | tagged | shown as a name, with a **Loop in** button that posts the tag when clicked |
+| `tag` | tagged | tagged |
+| `off` | shown as a name | shown as a name |
+
+### Tagging people, teams, and agents
+
+The agent can point you to someone who can help and tag them. It finds them in a few ways:
+
+- **People in the conversation** — the asker and everyone in the thread are listed in its context with their IDs.
+- **Workspace directory** — the `directory` MCP server (registered for all agents) has `find_people` (name, handle, job title), `find_groups` (user groups such as teams and on-call rotations, by handle or description), and `find_people_by_email`. The email lookup lets the agent go from `git log`/`git blame` authors to the Slack users who know the code. The directory is cached in SQLite and refreshed hourly.
+- **Agent collaborators** — other bots you register so the agent knows what each one is good at and can hand work to it:
+  ```
+  @Slackode collaborator add @ReviewBot Reviews pull requests and enforces style rules
+  @Slackode collaborator list
+  @Slackode collaborator remove @ReviewBot
+  ```
+- **Memory** — routing that the team saves (for example, "billing questions go to @payments-oncall") is recalled like any other memory.
+
+These rules always apply, in every mode:
+- `@here`, `@channel`, and `@everyone` never ping.
+- Tags with IDs the directory doesn't know are dropped, since the model probably made them up.
+- A reply pings at most 5 people or groups.
+- If the message the bot is answering came from another bot, the reply shows bots as names instead of tagging them, so two agents can't keep pinging each other.
+- Draft replies shown while the agent works, and scheduled-job review drafts, never ping anyone.
+
+Group lookup needs the `usergroups:read` scope, and email lookup needs `users:read.email`. Both are in `slack-manifest.yaml`. If you're upgrading an existing install, add them to the app and reinstall it.
+
 ### Tool management
 
 Manage the bot's MCP tool registry at runtime — no code changes or restarts needed.
@@ -397,6 +435,7 @@ Stats are read-only and open to all users. Threads are the headline metric (coun
 - **Slack Bot** — Bolt for JavaScript with Socket Mode. Handles @mentions, DMs, coding sessions, config/tool/repo/memory commands. Manages sessions in SQLite.
 - **OpenCode Server** — Agent runtime with tools (bash, read, grep, glob) and MCP servers. Multiple instances: one for Q&A (port 4096), one per active coding session (ports 4100+).
 - **Knowledge MCP Server** — Local stdio-based MCP server exposing `search_knowledge`, `recall_memories`, and `save_memory` tools. Registered automatically in all agents.
+- **Directory MCP Server** — Local stdio-based MCP server exposing `find_people`, `find_groups`, `find_people_by_email`, and `list_agent_collaborators`, backed by the Slack directory cache in SQLite. Registered automatically in all agents.
 - **SQLite** — Source of truth for sessions, channel config, tools, repos, memories, and knowledge.
 - **LanceDB** — Vector search index for semantic memory/knowledge retrieval. Embedded, on-disk, no server needed. Re-indexes knowledge from SQLite on a periodic interval (default 60s).
 

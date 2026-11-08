@@ -27,6 +27,7 @@ const FAMILIES: Family[] = [
       "• `config set tools <a,b>` / `config get tools` / `config clear tools`",
       "• `config set prompt <text>` / `config get prompt` / `config clear prompt`",
       "• `config set repo <name>` / `config get repo` / `config clear repo`",
+      "• `config set mentions tag|suggest|off` / `config get mentions` / `config clear mentions` — whether the bot may tag people outside the thread (default `suggest`: shows a *Loop in* button instead)",
       "• `config available agents|tools|repos` — list what can be selected",
       "• `config list channels` — unified view of every channel's overrides",
       "• Add `--channel <#chan>` to any command to configure another channel remotely (works from DMs; bot membership not required)",
@@ -146,6 +147,18 @@ const FAMILIES: Family[] = [
       "• `recall <query>` — search saved memories",
       "• `memories` — list everything you've saved",
       "• `forget #<id>` — delete one",
+    ],
+  },
+  {
+    key: "collaborator",
+    title: "Agent collaborators",
+    visibleTo: "anyone",
+    note: "`collaborator list` is open to all; add/remove is admin-only.",
+    blurb: "Register other bots/agents the bot can hand work to.",
+    lines: [
+      "• `collaborator list` — show registered agents and what they're good at",
+      "• `collaborator add @agent <what it's good at>`",
+      "• `collaborator remove @agent`",
     ],
   },
   {

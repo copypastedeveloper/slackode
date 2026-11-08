@@ -26,6 +26,8 @@ export const Action = {
   RUN_KEEP_WAITING: "run_keep_waiting",
   /** Long-running Q&A turn: stop the run. value = run key. */
   RUN_STOP: "run_stop",
+  /** Prefix for "Loop in" buttons on held-back mentions: loop_in_0, loop_in_1, etc. value = kind:id:label. */
+  LOOP_IN_PREFIX: "loop_in_",
 } as const;
 
 // ── Long-running Q&A turn control ──

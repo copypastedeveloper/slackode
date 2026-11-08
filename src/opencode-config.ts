@@ -164,6 +164,24 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
   }
   console.log("[config] Knowledge MCP server configured.");
 
+  // Always register the built-in directory MCP server (read-only lookups of
+  // people, user groups, and agent collaborators from the cached directory).
+  config.mcp.directory = {
+    type: "local",
+    command: ["node", `${mcpDistDir}/mcp/directory-server.js`],
+    enabled: true,
+    environment: {
+      ...(process.env.SESSIONS_DB_PATH ? { SESSIONS_DB_PATH: process.env.SESSIONS_DB_PATH } : {}),
+    },
+  };
+  config.tools["directory*"] = true;
+  for (const agentName of Object.keys(config.agent)) {
+    if (config.agent[agentName].tools) {
+      config.agent[agentName].tools["directory*"] = true;
+    }
+  }
+  console.log("[config] Directory MCP server configured.");
+
   setActiveTools(enabled);
 
   // Per-server tool allowlists: name -> allowed tool names/globs (empty = all).

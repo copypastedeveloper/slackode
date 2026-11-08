@@ -1,5 +1,6 @@
 import type { WebClient } from "@slack/web-api";
 import { markdownToPlainText } from "./formatting.js";
+import { applyChannelMentionPolicy } from "../slack-directory.js";
 
 /** Throttled Slack message updater — at most once per interval */
 export function createProgressUpdater(
@@ -14,7 +15,8 @@ export function createProgressUpdater(
 
   function flush() {
     if (pending !== null) {
-      const text = markdownToPlainText(pending);
+      // Interim text never pings anyone: mentions render as names until the final post.
+      const text = markdownToPlainText(applyChannelMentionPolicy(pending, { channelId: channel, mode: "off" }).markdown);
       // Truncate to Slack's limit; we'll send the full response at the end
       const truncated = text.length > 3000 ? text.slice(0, 2997) + "..." : text;
       slackClient.chat.update({ channel, ts, text: truncated + "\n\n_Thinking..._" }).catch(() => {});

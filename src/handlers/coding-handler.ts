@@ -13,7 +13,7 @@ import {
 import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
 import { downloadFiles, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
-import { safePostResponse } from "./shared.js";
+import { safePostResponse, mentionContextFor } from "./shared.js";
 import { Action, BlockPrefix, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, HOSTNAME } from "../constants.js";
 import { getEnabledRepos, getUserGithubToken } from "../sessions.js";
 import { resolveRepoForChannel } from "../repo-manager.js";
@@ -212,6 +212,7 @@ export async function handleCodingMessage(opts: CodingMessageOpts): Promise<void
       if (ctx.text) {
         slackCtx.threadContext = ctx.text;
       }
+      slackCtx.participants = [...new Set([slackCtx.userId, ...(slackCtx.participants ?? []), ...ctx.participants])];
       if (ctx.files.length > 0) {
         allFiles = [...allFiles, ...ctx.files];
       }
@@ -271,6 +272,7 @@ export async function handleCodingMessage(opts: CodingMessageOpts): Promise<void
       customClient: stillActive.client,
       customBaseUrl: serverUrl,
       actionButtons: buttons,
+      mentions: mentionContextFor(slackCtx),
     });
 
     // After posting the plan, transition to awaiting approval
@@ -462,6 +464,7 @@ export async function handleApprove(
       customClient: stillActive.client,
       customBaseUrl: serverUrl,
       actionButtons: codingPRButtons(threadTs),
+      mentions: mentionContextFor(slackCtx),
     });
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));

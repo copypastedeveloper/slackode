@@ -315,6 +315,54 @@ export function getDb(): Database.Database {
       try { db.exec(`ALTER TABLE turns ADD COLUMN ${col} INTEGER`); } catch { /* exists */ }
     }
     try { db.exec(`ALTER TABLE turns ADD COLUMN cost_usd REAL`); } catch { /* exists */ }
+
+    // ── Slack directory cache (people, user groups) ──
+    // Refreshed from the Slack API by the main process (src/slack-directory.ts)
+    // and read by the directory MCP server so the agent can find who to tag.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS slack_users (
+        id TEXT PRIMARY KEY,
+        handle TEXT NOT NULL DEFAULT '',
+        real_name TEXT NOT NULL DEFAULT '',
+        display_name TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        tz TEXT NOT NULL DEFAULT '',
+        is_bot INTEGER NOT NULL DEFAULT 0,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_slack_users_email ON slack_users(email)`);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS slack_usergroups (
+        id TEXT PRIMARY KEY,
+        handle TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        member_count INTEGER NOT NULL DEFAULT 0,
+        members TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    // Other bots/agents the assistant may hand work to, with what they're good at.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agent_collaborators (
+        user_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        added_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
+    // Per-channel mention policy: tag | suggest | off.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS channel_mentions (
+        channel_id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
   }
   return db;
 }

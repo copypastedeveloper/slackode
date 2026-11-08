@@ -15,6 +15,8 @@ import {
   restoreOpencodeDb, startPeriodicOpencodeDbSnapshot, stopPeriodicOpencodeDbSnapshot, finalSnapshotOpencodeDb,
 } from "./opencode-db-sync.js";
 import { startScheduler, stopScheduler } from "./scheduler.js";
+import { startDirectorySync, stopDirectorySync } from "./slack-directory.js";
+import { decodeLoopIn, mentionToken, MAX_SUGGESTIONS } from "./mentions.js";
 import { approveProbationRun, approveProbationRunNoPost, rejectProbationRun, pauseJobFromRun } from "./job-runner.js";
 import { handleMention } from "./handlers/mention.js";
 import { handleDm } from "./handlers/dm.js";
@@ -157,6 +159,36 @@ app.action(Action.RUN_KEEP_WAITING, async ({ action, ack, body, client }) => {
     }).catch(() => {});
   }
 });
+
+// "Loop in" buttons: a human confirms before someone outside the conversation
+// (or a whole user group) is pinged. The button is removed once used.
+for (let i = 0; i < MAX_SUGGESTIONS; i++) {
+  app.action(`${Action.LOOP_IN_PREFIX}${i}`, async ({ action, ack, body, client }) => {
+    await ack();
+    const target = decodeLoopIn((action as { value: string }).value);
+    const channel = (body as { channel?: { id: string } }).channel?.id;
+    const message = (body as { message?: { ts: string; thread_ts?: string; text?: string; blocks?: Array<{ type: string; elements?: Array<{ action_id?: string }> }> } }).message;
+    const clicker = body.user.id;
+    if (!target || !channel || !message) return;
+
+    await client.chat.postMessage({
+      channel,
+      thread_ts: message.thread_ts ?? message.ts,
+      text: `${mentionToken(target)} — <@${clicker}> is looping you in on this thread.`,
+    });
+
+    // Drop the used button (and the actions block if it's now empty).
+    const actionId = (action as { action_id: string }).action_id;
+    const blocks = (message.blocks ?? [])
+      .map((b) => b.type === "actions"
+        ? { ...b, elements: (b.elements ?? []).filter((e) => e.action_id !== actionId) }
+        : b)
+      .filter((b) => b.type !== "actions" || (b.elements ?? []).length > 0);
+    await client.chat.update({
+      channel, ts: message.ts, text: message.text ?? "", blocks: blocks as never[],
+    }).catch((err) => console.warn("[mentions] could not remove Loop-in button:", err));
+  });
+}
 
 registerProbationAction(Action.JOB_POST, (runId) => approveProbationRun(runId, app.client));
 registerProbationAction(Action.JOB_APPROVE, (runId) => approveProbationRunNoPost(runId));
@@ -461,6 +493,9 @@ async function start(): Promise<void> {
   // 9. Start the scheduled-jobs tick (needs app.client for posting)
   startScheduler(app.client);
 
+  // 10. Cache Slack people/user groups for mention lookups (hourly)
+  startDirectorySync(app.client);
+
   // Generate context files after a delay so startup Q&A isn't rate-limited
   const CONTEXT_GEN_STARTUP_DELAY_MS = 5 * 60 * 1000; // 5 minutes
   setTimeout(() => {
@@ -480,6 +515,7 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[shutdown] start (signal=${signal})`);
   try { stopScheduler(); } catch (e) { console.warn("[shutdown] stopScheduler:", e); }
+  try { stopDirectorySync(); } catch (e) { console.warn("[shutdown] stopDirectorySync:", e); }
   try { stopPeriodicTokenRefresh(); } catch (e) { console.warn("[shutdown] stopPeriodicTokenRefresh:", e); }
   try { stopPeriodicGDocsSync(); } catch (e) { console.warn("[shutdown] stopPeriodicGDocsSync:", e); }
   try { stopPeriodicOpencodeDbSnapshot(); } catch (e) { console.warn("[shutdown] stopPeriodicOpencodeDbSnapshot:", e); }

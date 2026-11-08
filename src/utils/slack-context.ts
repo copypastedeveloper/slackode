@@ -17,6 +17,12 @@ export interface SlackContext {
   customPrompt?: string;
   threadContext?: string;
   linkedThreadContext?: string;
+  /** User IDs already in the conversation (asker, thread authors, people mentioned in it). */
+  participants?: string[];
+  /** The message that triggered this turn was posted by another bot/agent. */
+  triggeredByBot?: boolean;
+  /** This bot's own user ID. */
+  botUserId?: string;
 }
 
 export async function getSlackContext(
@@ -78,6 +84,47 @@ const MAX_THREAD_CONTEXT_CHARS = 3000;
 export interface ThreadContextResult {
   text: string;
   files: SlackFile[];
+  /** User IDs already in the conversation (authors and people mentioned), excluding this bot. */
+  participants: string[];
+}
+
+const MENTION_ID_RE = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g;
+
+type NameCache = Map<string, { name: string; isBot: boolean }>;
+
+/** Resolve a user ID to a display name (cached per call). */
+async function resolveUser(client: WebClient, cache: NameCache, id: string): Promise<{ name: string; isBot: boolean }> {
+  const hit = cache.get(id);
+  if (hit) return hit;
+  let entry = { name: "Unknown", isBot: false };
+  try {
+    const info = await client.users.info({ user: id });
+    entry = {
+      name: info.user?.profile?.real_name || info.user?.real_name || info.user?.name || "Unknown",
+      isBot: !!info.user?.is_bot,
+    };
+  } catch {
+    // keep Unknown
+  }
+  cache.set(id, entry);
+  return entry;
+}
+
+/**
+ * One-line roster of who is in a conversation, with mention tokens, so the
+ * agent can tag the right person: `Jane Doe <@U1>, ReviewBot [bot] <@U2>`.
+ */
+async function buildRoster(client: WebClient, cache: NameCache, ids: Iterable<string>): Promise<string> {
+  const parts: string[] = [];
+  for (const id of ids) {
+    const u = await resolveUser(client, cache, id);
+    parts.push(`${u.name}${u.isBot ? " [bot]" : ""} <@${id}>`);
+  }
+  return parts.join(", ");
+}
+
+function mentionedIds(text: string): string[] {
+  return [...text.matchAll(MENTION_ID_RE)].map((m) => m[1]);
 }
 
 /**
@@ -103,8 +150,8 @@ export async function fetchThreadContext(
 
     const messages = result.messages ?? [];
 
-    // Build a user ID -> display name cache from the thread
-    const userNames = new Map<string, string>();
+    const names: NameCache = new Map();
+    const participants = new Set<string>();
 
     const lines: string[] = [];
     const threadFiles: SlackFile[] = [];
@@ -127,23 +174,22 @@ export async function fetchThreadContext(
       // Skip messages without text for the text context
       if (!msg.text) continue;
 
-      // Resolve display name (human user or bot)
+      // Resolve display name: this bot, another bot/agent, or a person
       let name = "Unknown";
-      if (msg.bot_id || (botUserId && msg.user === botUserId)) {
-        name = "Bot";
+      const isSelf = !!botUserId && msg.user === botUserId;
+      if (isSelf) {
+        name = "Bot (you)";
+      } else if (msg.bot_id) {
+        const botName = (msgAny.bot_profile as { name?: string } | undefined)?.name
+          ?? (msgAny.username as string | undefined) ?? "Bot";
+        name = `${botName} [bot]`;
+        if (msg.user) participants.add(msg.user);
       } else if (msg.user) {
-        if (userNames.has(msg.user)) {
-          name = userNames.get(msg.user)!;
-        } else {
-          try {
-            const info = await client.users.info({ user: msg.user });
-            const resolved = info.user?.profile?.real_name ?? info.user?.name ?? "Unknown";
-            userNames.set(msg.user, resolved);
-            name = resolved;
-          } catch {
-            userNames.set(msg.user, "Unknown");
-          }
-        }
+        name = (await resolveUser(client, names, msg.user)).name;
+        participants.add(msg.user);
+      }
+      for (const id of mentionedIds(msg.text)) {
+        if (id !== botUserId) participants.add(id);
       }
 
       lines.push(`${name}: ${msg.text}`);
@@ -164,10 +210,15 @@ export async function fetchThreadContext(
       }
     }
 
-    return { text: combined, files: threadFiles };
+    if (combined && participants.size > 0) {
+      const roster = await buildRoster(client, names, participants);
+      combined = `People in this conversation: ${roster}\n---\n${combined}`;
+    }
+
+    return { text: combined, files: threadFiles, participants: [...participants] };
   } catch (err) {
     console.warn("Failed to fetch thread context:", err);
-    return { text: "", files: [] };
+    return { text: "", files: [], participants: [] };
   }
 }
 
@@ -266,8 +317,8 @@ export async function fetchLinkedThreads(
         // Can't resolve name — use ID
       }
 
-      // Build a user ID -> display name cache
-      const userNames = new Map<string, string>();
+      const names: NameCache = new Map();
+      const authors = new Set<string>();
       const lines: string[] = [];
 
       for (const msg of messages) {
@@ -277,18 +328,8 @@ export async function fetchLinkedThreads(
 
         let name = "Unknown";
         if (msg.user) {
-          if (userNames.has(msg.user)) {
-            name = userNames.get(msg.user)!;
-          } else {
-            try {
-              const info = await client.users.info({ user: msg.user });
-              const resolved = info.user?.profile?.real_name ?? info.user?.name ?? "Unknown";
-              userNames.set(msg.user, resolved);
-              name = resolved;
-            } catch {
-              userNames.set(msg.user, "Unknown");
-            }
-          }
+          name = (await resolveUser(client, names, msg.user)).name;
+          authors.add(msg.user);
         }
 
         lines.push(`${name}: ${msg.text}`);
@@ -305,7 +346,10 @@ export async function fetchLinkedThreads(
         }
       }
 
-      sections.push(`[Linked thread from ${channelLabel}]\n${combined}`);
+      // Authors here are NOT in the current conversation — tagging them is a
+      // suggestion the mention policy may hold back.
+      const roster = authors.size > 0 ? `\nPeople in that thread: ${await buildRoster(client, names, authors)}` : "";
+      sections.push(`[Linked thread from ${channelLabel}]${roster}\n${combined}`);
     } catch (err) {
       console.warn(`Failed to fetch linked thread ${link.channelId}/${link.messageTs}:`, err);
     }

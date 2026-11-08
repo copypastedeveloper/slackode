@@ -22,6 +22,8 @@ import { formatResponse } from "../utils/formatting.js";
 import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
 import { downloadFiles, TEXT_MIMES, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
+import { applyChannelMentionPolicy, type MentionContext } from "../slack-directory.js";
+import { buildLoopInBlock, hasLiveMention } from "../mentions.js";
 import { handleConfigCommand } from "./config-commands.js";
 import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
 import { handleRepoCommand } from "./repo-commands.js";
@@ -34,6 +36,7 @@ import { handleKnowledgeCommand, type KnowledgeImportFile } from "./knowledge-co
 import { handleHelpCommand } from "./help-commands.js";
 import { handleStatsCommand } from "./stats-commands.js";
 import { handleScheduleCommand } from "./schedule-commands.js";
+import { handleCollaboratorCommand } from "./collaborator-commands.js";
 
 /** Send an ephemeral denial message visible only to the requesting user. */
 async function denyAccess(
@@ -59,7 +62,19 @@ export interface IncomingOpts {
   eventTs: string;
   isThread: boolean;
   botUserId?: string;
+  /** The triggering message was posted by another bot/agent. */
+  fromBot?: boolean;
   client: WebClient;
+}
+
+/** Mention policy inputs for a reply in the conversation described by `ctx`. */
+export function mentionContextFor(ctx: SlackContext): MentionContext {
+  return {
+    channelId: ctx.channelId,
+    participants: ctx.participants ?? [ctx.userId],
+    botUserId: ctx.botUserId,
+    triggeredByBot: ctx.triggeredByBot,
+  };
 }
 
 /**
@@ -70,7 +85,7 @@ export interface IncomingOpts {
 export async function processIncoming(opts: IncomingOpts): Promise<void> {
   const {
     text: question, files: eventFiles, channelId, channelType,
-    userId, threadTs, eventTs, isThread, botUserId, client,
+    userId, threadTs, eventTs, isThread, botUserId, fromBot, client,
   } = opts;
 
   const hasFiles = eventFiles.length > 0;
@@ -90,6 +105,9 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
   // ── Command routing (skip when files are attached) ──
   const channelName = channelType === "dm" ? "DM" : undefined;
   const slackCtx = await getSlackContext(client, userId, channelId, channelType);
+  slackCtx.participants = [userId];
+  slackCtx.botUserId = botUserId;
+  slackCtx.triggeredByBot = fromBot;
 
   // ── Knowledge import with attached files (must be before !hasFiles guard) ──
   if (hasFiles && question && /^knowledge\s+import/i.test(question)) {
@@ -192,6 +210,13 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
         }
         return;
       }
+    }
+
+    // ── Agent collaborators (list open; add/remove admin-only) ──
+    const collaboratorReply = await handleCollaboratorCommand(question, userId, client);
+    if (collaboratorReply) {
+      await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: collaboratorReply });
+      return;
     }
 
     const memoryReply = await handleMemoryCommand(question, channelId, userId);
@@ -305,6 +330,7 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
         client, channelId, threadTs, eventTs, botUserId,
       );
       threadContext = ctx.text || undefined;
+      slackCtx.participants = [...new Set([userId, ...ctx.participants])];
       if (ctx.files.length > 0) {
         allFiles = [...allFiles, ...ctx.files];
       }
@@ -560,6 +586,7 @@ export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
     client, channel, threadTs, placeholderTs,
     rawMarkdown,
     sessionId,
+    mentions: mentionContextFor(slackCtx),
   });
 
   // If the agent scheduled a job this session, its owner (created_by) was
@@ -638,29 +665,48 @@ export interface SafePostOpts {
   customBaseUrl?: string;
   /** Append action buttons to the last message. */
   actionButtons?: KnownBlock;
+  /**
+   * Who may be tagged. Without it, only the channel's mode applies and nobody
+   * counts as a participant (so in suggest mode every mention is held back).
+   */
+  mentions?: MentionContext;
 }
 
 export async function safePostResponse(opts: SafePostOpts): Promise<void> {
   const { client, channel, threadTs, placeholderTs, rawMarkdown, sessionId, customClient, customBaseUrl, actionButtons } = opts;
 
   const tryPost = async (markdown: string) => {
-    const messages = formatResponse(markdown);
-    if (actionButtons) {
+    const policy = applyChannelMentionPolicy(markdown, opts.mentions ?? { channelId: channel });
+    const messages = formatResponse(policy.markdown);
+    const trailing = [buildLoopInBlock(policy.suggestions), actionButtons].filter((b): b is KnownBlock => !!b);
+    for (const block of trailing) {
       const last = messages[messages.length - 1];
       if (last.blocks.length >= 50) {
         // Last message is full — append buttons as a separate message
-        messages.push({ text: "", blocks: [actionButtons] });
+        messages.push({ text: "", blocks: [block] });
       } else {
-        last.blocks.push(actionButtons);
+        last.blocks.push(block);
       }
     }
     const first = messages[0];
-    await client.chat.update({
-      channel,
-      ts: placeholderTs,
-      text: first.text,
-      ...(first.blocks && { blocks: first.blocks }),
-    });
+    if (policy.liveCount > 0 && hasLiveMention(JSON.stringify(first))) {
+      // Slack doesn't notify for mentions added by editing a message, so a
+      // reply that tags someone is posted fresh and the placeholder removed.
+      await client.chat.postMessage({
+        channel,
+        thread_ts: threadTs,
+        text: first.text,
+        ...(first.blocks && { blocks: first.blocks }),
+      });
+      await client.chat.delete({ channel, ts: placeholderTs }).catch(() => {});
+    } else {
+      await client.chat.update({
+        channel,
+        ts: placeholderTs,
+        text: first.text,
+        ...(first.blocks && { blocks: first.blocks }),
+      });
+    }
     for (let i = 1; i < messages.length; i++) {
       const msg = messages[i];
       await client.chat.postMessage({

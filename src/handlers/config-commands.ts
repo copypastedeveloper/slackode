@@ -5,7 +5,15 @@ import {
   getChannelConfig, setChannelConfig, clearChannelConfig, listChannelConfigs,
   getChannelRepo, setChannelRepo, clearChannelRepo, listChannelRepos,
   getRepo, getDefaultRepo, getAllRepos,
+  getChannelMentionMode, setChannelMentionMode, clearChannelMentionMode,
+  MENTION_MODES, DEFAULT_MENTION_MODE, type MentionMode,
 } from "../sessions.js";
+
+const MENTION_MODE_HELP: Record<MentionMode, string> = {
+  tag: "the bot tags people and groups directly",
+  suggest: "the bot tags people already in the thread; anyone else gets a *Loop in* button",
+  off: "the bot names people but never tags anyone",
+};
 import { getKnownTools, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
 
 /**
@@ -169,6 +177,31 @@ export async function handleConfigCommand(
     return `Custom instructions cleared.`;
   }
 
+  // --- Mention policy ---
+
+  // config set mentions <tag|suggest|off>
+  const setMentionsMatch = subcommand.match(/^set\s+mentions?\s+(\S+)$/i);
+  if (setMentionsMatch) {
+    const mode = setMentionsMatch[1].toLowerCase() as MentionMode;
+    if (!MENTION_MODES.includes(mode)) {
+      return `Unknown mention mode \`${mode}\`. Use one of: ${MENTION_MODES.map((m) => `\`${m}\``).join(", ")}.`;
+    }
+    setChannelMentionMode(channelId, mode);
+    return `Mentions set to \`${mode}\` — ${MENTION_MODE_HELP[mode]}.`;
+  }
+
+  // config get mentions
+  if (/^get\s+mentions?$/i.test(subcommand)) {
+    const mode = getChannelMentionMode(channelId);
+    return `Mentions: \`${mode}\` — ${MENTION_MODE_HELP[mode]}.`;
+  }
+
+  // config clear mentions
+  if (/^clear\s+mentions?$/i.test(subcommand)) {
+    clearChannelMentionMode(channelId);
+    return `Mention setting cleared. Using the default (\`${DEFAULT_MENTION_MODE}\`).`;
+  }
+
   // --- Repo commands ---
 
   // config set repo <name>
@@ -288,6 +321,7 @@ export async function handleConfigCommand(
     "• `config clear repo`",
     "• `config list repos`",
     "• `config available repos`",
+    "• `config set mentions tag|suggest|off` / `config get mentions` / `config clear mentions`",
     "• `config list channels` — unified per-channel view (agent + tools + repo + prompt)",
     "• Add `--channel <#chan>` to any command to configure a channel you're not in",
   ].join("\n");

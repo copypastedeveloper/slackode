@@ -9,6 +9,7 @@ import { getToolInstructions } from "./tools.js";
 import { readRepoContextFiles, readRepoOverview } from "./context-gen.js";
 import { getGlobalKnowledge } from "./knowledge.js";
 import type { SlackContext } from "./utils/slack-context.js";
+import { listAgentCollaborators } from "./db/directory.js";
 
 export type PrefixMode = "qa" | "coding" | "planning" | "minimal-coding" | "minimal-planning";
 
@@ -238,13 +239,44 @@ const INSTRUCTION_BUILDERS: Record<PrefixMode, (opts: PrefixOpts) => string[]> =
   "minimal-planning": buildMinimalPlanningInstructions,
 };
 
+// ── Tagging people, teams, and other agents ──
+
+function appendMentionInstructions(lines: string[]): void {
+  lines.push(
+    "",
+    "TAGGING PEOPLE, TEAMS & AGENTS:",
+    "You can point the user to someone who can help, or hand part of the work to another agent.",
+    "- Tag a person as `<@U123ABC>` and a user group as `<!subteam^S123ABC>`. Write exactly that — no `|label`, no plain `@name`.",
+    "- Only use IDs from <context> (the asker, \"People in this conversation\", linked threads) or returned by a directory tool. NEVER guess or invent an ID.",
+    "- To find someone not in the conversation: `find_people` (name or job title), `find_groups` (teams, on-call rotations), " +
+    "or `find_people_by_email` with authors from `git log --format='%an <%ae>' -- <path>` to find who knows a piece of code.",
+    "- Prefer a team's group over an individual when the question belongs to a team or rotation. Suggest at most 1-2 people or groups, " +
+    "and say why each is relevant (e.g. \"most recent commits to `src/billing/`\", \"group covers invoicing\").",
+    "- Only tag when it actually helps (the user asks who to talk to, or the answer needs a human decision you can't make). Don't tag people for routine answers.",
+    "- Never write @here, @channel, or @everyone.",
+    "- Whether a tag notifies right away or shows a \"Loop in\" button for the user to confirm is decided by the channel's settings — just write the tag.",
+  );
+
+  const collaborators = listAgentCollaborators();
+  if (collaborators.length > 0) {
+    lines.push(
+      "",
+      "Other agents you can hand work to (tag them with the request in the same message; they reply in the thread):",
+      ...collaborators.map((a) => `- ${a.name} <@${a.user_id}>: ${a.description}`),
+      "Hand off only the part of the request that agent is better at, and state exactly what you need from it. " +
+      "If the message you are answering came from another agent, answer it — don't tag agents back.",
+    );
+  }
+}
+
 // ── Shared context/thread/linked-thread assembly ──
 
 function appendContextBlock(lines: string[], ctx: SlackContext): void {
   // IDs are included so tools that take user/channel arguments (e.g. the
   // scheduler tools) can be called with the real Slack IDs, not display names.
-  lines.push(`User: ${ctx.userName} (user ID: ${ctx.userId})`);
+  lines.push(`User: ${ctx.userName} (user ID: ${ctx.userId}, tag: <@${ctx.userId}>)`);
   if (ctx.threadTs) lines.push(`Thread ID: ${ctx.threadTs}`);
+  if (ctx.triggeredByBot) lines.push("Note: this message was sent by another bot/agent, not a person.");
   if (ctx.userTitle) lines.push(`Role/Title: ${ctx.userTitle}`);
   if (ctx.userStatusText) lines.push(`Status: ${ctx.userStatusText}`);
   lines.push(`Channel: ${ctx.channelName} (channel ID: ${ctx.channelId}, ${ctx.channelType})`);
@@ -344,6 +376,8 @@ export function buildPrefix(opts: PrefixOpts): string {
     "- `save_memory`: proactively save important information when a user corrects you, states a convention, " +
     "makes a decision, or shares institutional knowledge. Save it without asking — just do it and briefly mention you did.",
   );
+
+  appendMentionInstructions(lines);
 
   // Security line
   lines.push("", SECURITY_LINE);
