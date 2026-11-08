@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyMentionPolicy, buildLoopInBlock, decodeLoopIn, encodeLoopIn, hasLiveMention, mentionToken,
+  applyMentionPolicy, buildLoopInBlock, decodeLoopIn, encodeLoopIn, mentionToken,
   MAX_LIVE_MENTIONS, type DirectoryLookup, type MentionPolicy,
 } from "./mentions.js";
 import { formatResponse } from "./utils/formatting.js";
@@ -98,7 +98,6 @@ test("tags render in sections and table cells", () => {
   const table = formatResponse(r.markdown).flatMap((m) => m.blocks).find((b) => b.type === "table") as unknown as { rows: unknown[][] };
   assert.ok(table, "table block present");
   assert.ok(table.rows.every((row) => row.length === 2));
-  assert.ok(hasLiveMention(json));
 });
 
 test("loop-in buttons round-trip", () => {

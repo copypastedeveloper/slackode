@@ -123,11 +123,6 @@ export function applyMentionPolicy(
   return { markdown: out, liveCount, suggestions: [...suggestions.values()] };
 }
 
-/** Matches any live person/group mention left in a rendered message. */
-export function hasLiveMention(text: string): boolean {
-  return /<@[UW][A-Z0-9]+>|<!subteam\^S[A-Z0-9]+>/.test(text);
-}
-
 /** Encode a Loop-in button value: kind:id:label (label is display-only). */
 export function encodeLoopIn(s: MentionSuggestion): string {
   return `${s.kind}:${s.id}:${s.label}`.slice(0, 2000);

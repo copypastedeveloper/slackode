@@ -23,7 +23,7 @@ import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackCont
 import { downloadFiles, TEXT_MIMES, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
 import { createProgressUpdater } from "../utils/progress.js";
 import { applyChannelMentionPolicy, type MentionContext } from "../slack-directory.js";
-import { buildLoopInBlock, hasLiveMention } from "../mentions.js";
+import { buildLoopInBlock } from "../mentions.js";
 import { handleConfigCommand } from "./config-commands.js";
 import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
 import { handleRepoCommand } from "./repo-commands.js";
@@ -688,34 +688,27 @@ export async function safePostResponse(opts: SafePostOpts): Promise<void> {
         last.blocks.push(block);
       }
     }
-    const first = messages[0];
-    if (policy.liveCount > 0 && hasLiveMention(JSON.stringify(first))) {
-      // Slack doesn't notify for mentions added by editing a message, so a
-      // reply that tags someone is posted fresh and the placeholder removed.
-      await client.chat.postMessage({
-        channel,
-        thread_ts: threadTs,
-        text: first.text,
-        ...(first.blocks && { blocks: first.blocks }),
-      });
-      await client.chat.delete({ channel, ts: placeholderTs }).catch(() => {});
-    } else {
-      await client.chat.update({
-        channel,
-        ts: placeholderTs,
-        text: first.text,
-        ...(first.blocks && { blocks: first.blocks }),
-      });
+    // The answer is always posted as new messages and the placeholder is then
+    // deleted, never edited in place: Slack doesn't send notifications for
+    // mentions added by editing a message, and a new post also shows up as
+    // unread for people following the thread.
+    const posted: string[] = [];
+    try {
+      for (const msg of messages) {
+        const res = await client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: msg.text,
+          ...(msg.blocks && { blocks: msg.blocks }),
+        });
+        if (res.ts) posted.push(res.ts);
+      }
+    } catch (err) {
+      // Don't leave half an answer behind if we're about to retry shorter.
+      for (const ts of posted) await client.chat.delete({ channel, ts }).catch(() => {});
+      throw err;
     }
-    for (let i = 1; i < messages.length; i++) {
-      const msg = messages[i];
-      await client.chat.postMessage({
-        channel,
-        thread_ts: threadTs,
-        text: msg.text,
-        ...(msg.blocks && { blocks: msg.blocks }),
-      });
-    }
+    await client.chat.delete({ channel, ts: placeholderTs }).catch(() => {});
   };
 
   try {
