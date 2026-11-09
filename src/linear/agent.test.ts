@@ -220,6 +220,53 @@ test("redeliveries and events for other workspaces or apps are ignored", async (
   assert.equal(h.asks.length, 1);
 });
 
+test("a Stop can't overtake the mention it follows, even while identity is retrying", async () => {
+  let attempts = 0;
+  const h = harness({
+    getIdentity: async () => {
+      if (++attempts === 1) throw new Error("HTTP 503");
+      return { appUserId: "app-user", organizationId: "org-narmi", organizationName: "Narmi" };
+    },
+    identityRetryDelaysMs: [20],
+  });
+  // Answers after 50ms unless aborted first.
+  h.setAsk((opts) => new Promise<AskResult>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(ANSWER), 50);
+    opts.abortSignal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("Session aborted")); });
+  }));
+  void h.agent.handle(created());
+  void h.agent.handle(stop());
+  await h.agent.idle();
+  assert.deepEqual(h.durable().filter((c) => c.type === "response"), [{ type: "response", body: STOPPED }]);
+});
+
+test("activities stay in order across turns, even when one is slow to post", async () => {
+  const order: string[] = [];
+  let delayed = false;
+  const h = harness({
+    linear: {
+      createActivity: async (_id, content) => {
+        if (content.type === "error" && !delayed) {
+          delayed = true;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        order.push(content.type);
+      },
+    },
+  });
+  h.setAsk(async () => {
+    if (h.asks.length === 1) throw new Error("boom");
+    return ANSWER;
+  });
+  await h.agent.handle(created());
+  await waitFor(() => h.asks.length === 1);
+  await new Promise((r) => setTimeout(r, 10));
+  await h.agent.handle(prompted("try again"));
+  await h.agent.idle();
+  await waitFor(() => order.includes("error") && order.includes("response"));
+  assert.ok(order.indexOf("error") < order.indexOf("response"), `got ${order.join(", ")}`);
+});
+
 test("a transient identity failure is retried instead of dropping the event", async () => {
   let attempts = 0;
   const h = harness({

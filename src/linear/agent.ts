@@ -98,20 +98,26 @@ const SEEN_LIMIT = 1000;
 export class LinearAgent {
   private readonly sessions = new Map<string, Session>();
   private readonly seen = new Set<string>();
+  /** Per agent session, so its events are handled in arrival order (a Stop can't overtake its mention). */
+  private readonly inbox = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: LinearAgentDeps) {}
 
   /** Entry point for a verified webhook payload. Never throws. */
   async handle(payload: unknown): Promise<void> {
-    try {
-      await this.handleEvent(payload as AgentSessionEvent);
-    } catch (err) {
-      console.error("[linear] Failed to handle webhook event:", err);
-    }
+    const e = payload as AgentSessionEvent;
+    const key = e?.agentSession?.id ?? "";
+    const next = (this.inbox.get(key) ?? Promise.resolve())
+      .then(() => this.handleEvent(e))
+      .catch((err) => console.error("[linear] Failed to handle webhook event:", err));
+    this.inbox.set(key, next);
+    await next;
+    if (this.inbox.get(key) === next) this.inbox.delete(key);
   }
 
-  /** Resolves once no turn is queued or running (for tests). */
+  /** Resolves once no event or turn is pending (for tests). */
   async idle(): Promise<void> {
+    await Promise.all(this.inbox.values());
     while ([...this.sessions.values()].some((s) => s.running || s.queue.length > 0)) {
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -198,7 +204,7 @@ export class LinearAgent {
   private async stop(s: Session): Promise<void> {
     s.generation += 1;
     const run = s.current;
-    const hadWork = Boolean(run) || s.queue.length > 0;
+    const hadWork = s.running || s.queue.length > 0;
     s.queue.length = 0;
     if (run && !run.stopRequested) {
       run.stopRequested = true;
@@ -226,7 +232,6 @@ export class LinearAgent {
       }
     } finally {
       s.running = false;
-      if (s.queue.length === 0) this.sessions.delete(s.id);
     }
   }
 
