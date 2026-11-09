@@ -185,7 +185,8 @@ test("stop aborts the running turn and drops queued follow-ups", async () => {
   await h.agent.idle();
 
   assert.equal(h.asks.length, 1, "the queued follow-up should be dropped");
-  assert.deepEqual(h.abortedServerSide, [h.asks[0].sessionId]);
+  // Once when Stop arrives, once more after the turn settles.
+  assert.deepEqual(h.abortedServerSide, [h.asks[0].sessionId, h.asks[0].sessionId]);
   const responses = durable(h.posted).filter((c) => c.type === "response");
   assert.deepEqual(responses, [{ type: "response", body: "Stopped. I won't take any further action on this." }]);
 });
@@ -218,6 +219,70 @@ test("a reply sent right after Stop waits for the server-side abort", async () =
     durable(h.posted).filter((c) => c.type === "response").map((c) => (c as { body: string }).body),
     ["Stopped. I won't take any further action on this.", "answer after stop"],
   );
+});
+
+test("a second Stop doesn't let a reply start before the first abort lands", async () => {
+  let releaseAbort!: () => void;
+  const abortGate = new Promise<void>((r) => { releaseAbort = r; });
+  const h = harness({ abortServerSide: () => abortGate });
+  h.setAsk((opts) => {
+    if (opts.question.startsWith("<issue")) {
+      return new Promise<AskResult>((_resolve, reject) => {
+        opts.abortSignal?.addEventListener("abort", () => reject(new Error("Session aborted")));
+      });
+    }
+    return Promise.resolve({ ...ANSWER, text: "answer after stops" });
+  });
+  const stopEvent = (id: string) =>
+    promptedEvent("", { agentActivity: { id, signal: "stop", content: { type: "prompt", body: "" } } });
+
+  await h.agent.handle(createdEvent());
+  await waitFor(() => h.asks.length === 1);
+  void h.agent.handle(stopEvent("stop-1"));
+  void h.agent.handle(stopEvent("stop-2"));
+  void h.agent.handle(promptedEvent("new question"));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(h.asks.length, 1, "the reply must wait for the pending abort");
+
+  releaseAbort();
+  await h.agent.idle();
+  assert.equal(h.asks.length, 2);
+  assert.deepEqual(durable(h.posted).at(-1), { type: "response", body: "answer after stops" });
+});
+
+test("Stop during stream setup aborts again once the prompt has reached the server", async () => {
+  const log: string[] = [];
+  const h = harness({
+    abortServerSide: async () => {
+      log.push("abort");
+    },
+  });
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((r) => { releaseFirst = r; });
+  h.setAsk(async (opts) => {
+    if (opts.question.startsWith("<issue")) {
+      // Simulates askQuestion dispatching the prompt without noticing the
+      // abort (it was still opening the stream when Stop's abort landed).
+      await firstGate;
+      log.push("first turn settled");
+      return ANSWER;
+    }
+    log.push("next turn started");
+    return ANSWER;
+  });
+
+  await h.agent.handle(createdEvent());
+  await waitFor(() => h.asks.length === 1);
+  void h.agent.handle(promptedEvent("", { agentActivity: { id: "stop-1", signal: "stop", content: { type: "prompt", body: "" } } }));
+  void h.agent.handle(promptedEvent("next"));
+  await new Promise((r) => setTimeout(r, 10));
+  releaseFirst();
+  await h.agent.idle();
+
+  assert.deepEqual(log, ["abort", "first turn settled", "abort", "next turn started"]);
+  // The stopped turn's answer is discarded; only the next turn's is posted.
+  const responses = durable(h.posted).filter((c) => c.type === "response").map((c) => (c as { body: string }).body);
+  assert.deepEqual(responses, ["Stopped. I won't take any further action on this.", ANSWER.text]);
 });
 
 test("a redelivered event is handled once", async () => {

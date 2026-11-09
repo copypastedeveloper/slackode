@@ -28,7 +28,7 @@ Linear ──POST /webhooks/linear──▶ server.ts ── verify HMAC + times
 |---|---|
 | `created` (mention or delegation) | Post a thought immediately: Linear marks a session unresponsive after about 10 seconds without one. Ask `promptContext`, the issue and thread as Linear formats them. If it's missing, fall back to the issue and comment. |
 | `prompted` (reply in the thread) | Ask `agentActivity.content.body` in the same OpenCode session. If a turn is already running, queue the reply behind it. |
-| `prompted` with `signal: "stop"` | Abort the running turn, both locally and on the server. Drop queued replies, then post a response confirming the stop. |
+| `prompted` with `signal: "stop"` | Abort the running turn, both locally and on the server, drop queued replies, and post a response confirming the stop. The stopped turn waits for that abort, then aborts once more. That covers a prompt that reached the server after the first abort. Turns run one at a time per session, so a reply sent right after Stop can't start until both aborts have landed. |
 
 ## Decisions
 

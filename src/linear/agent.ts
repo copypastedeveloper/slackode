@@ -90,6 +90,8 @@ interface RunHandle {
   controller: AbortController;
   sessionId: string;
   stopRequested: boolean;
+  /** Stop's immediate server-side abort; the turn waits for it before finishing. */
+  serverAbort?: Promise<void>;
 }
 
 interface SessionState {
@@ -100,8 +102,6 @@ interface SessionState {
   /** Bumped by stop: every turn from an older generation is dropped. */
   generation: number;
   current?: RunHandle;
-  /** Set while a stop is aborting server-side; the next turn waits for it. */
-  stopping?: Promise<void>;
   ctx: LinearTurnContext;
   lastUsed: number;
 }
@@ -233,30 +233,27 @@ export class LinearAgent {
     }
   }
 
+  /**
+   * Cancel the running turn and drop queued ones. The server-side abort starts
+   * now, so a long tool call ends promptly, but the running turn itself waits
+   * for it (see runTurn). Turns in a session run one at a time, so a reply
+   * sent after Stop can't start until the abort has landed and can't be
+   * cancelled by it.
+   */
   private async stop(s: SessionState): Promise<void> {
     s.generation += 1;
-    const hadWork = Boolean(s.current) || s.queue.length > 0;
-    s.queue.length = 0;
     const run = s.current;
-    if (run) {
+    const hadWork = Boolean(run) || s.queue.length > 0;
+    s.queue.length = 0;
+    if (run && !run.stopRequested) {
       run.stopRequested = true;
       run.controller.abort();
+      run.serverAbort = this.deps.abortServerSide(run.sessionId);
     }
-    // A reply sent right after Stop must not start on the OpenCode session
-    // until the server-side abort has landed, or that abort would cancel it.
-    const stopping = (async () => {
-      if (run) await this.deps.abortServerSide(run.sessionId);
-      await s.activities.push({
-        type: "response",
-        body: hadWork ? "Stopped. I won't take any further action on this." : "Nothing was running, so there was nothing to stop.",
-      });
-    })();
-    s.stopping = stopping;
-    try {
-      await stopping;
-    } finally {
-      if (s.stopping === stopping) s.stopping = undefined;
-    }
+    await s.activities.push({
+      type: "response",
+      body: hadWork ? "Stopped. I won't take any further action on this." : "Nothing was running, so there was nothing to stop.",
+    });
   }
 
   private async pump(s: SessionState): Promise<void> {
@@ -282,7 +279,6 @@ export class LinearAgent {
 
   private async runTurn(s: SessionState, turn: Turn): Promise<void> {
     await this.deps.ready;
-    while (s.stopping) await s.stopping.catch(() => {});
     if (this.deps.server.isRestarting()) await this.deps.server.waitForRestart();
     if (turn.generation !== s.generation) return;
 
@@ -338,6 +334,13 @@ export class LinearAgent {
       }
     } finally {
       progress.stop();
+      if (run.stopRequested) {
+        // Stop's abort may have landed before this prompt reached the server
+        // (e.g. while the stream was still opening). Abort once more now that
+        // the turn has settled, before the next turn can use the session.
+        await run.serverAbort?.catch(() => {});
+        await this.deps.abortServerSide(sessionId).catch(() => {});
+      }
       if (s.current === run) s.current = undefined;
     }
 

@@ -333,6 +333,15 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   // (user message creation, first step-start) can fire before we're listening.
   const { sseClient, stream: eventStream } = await openStream(activeBaseUrl);
 
+  // Cancelled while the stream was opening: don't start work nobody will read.
+  if (abortSignal?.aborted) {
+    await eventStream.return(undefined);
+    recordTurnIfRequested(analytics, {
+      outcome: "aborted", question, agent, repoName: repo?.name, toolsEnabled: tools, sessionId,
+    });
+    throw new Error("Session aborted");
+  }
+
   try {
     await activeClient.session.promptAsync({
       path: { id: sessionId },
