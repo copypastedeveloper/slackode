@@ -66,6 +66,7 @@ function harness(overrides: Partial<LinearAgentDeps> = {}) {
 
   return {
     agent: new LinearAgent(deps),
+    deps,
     posted,
     asks,
     mappings,
@@ -283,6 +284,61 @@ test("Stop during stream setup aborts again once the prompt has reached the serv
   // The stopped turn's answer is discarded; only the next turn's is posted.
   const responses = durable(h.posted).filter((c) => c.type === "response").map((c) => (c as { body: string }).body);
   assert.deepEqual(responses, ["Stopped. I won't take any further action on this.", ANSWER.text]);
+});
+
+test("Stop during session setup still sends full instructions on the next reply", async () => {
+  for (const startCompacted of [false, true]) {
+    let releaseSetup!: () => void;
+    const setupGate = new Promise<void>((r) => { releaseSetup = r; });
+    const h = harness();
+    const realGetOrCreate = h.deps.sessions.getOrCreate;
+    if (startCompacted) {
+      // An existing session whose context was compacted: it owes the full instructions.
+      await realGetOrCreate("linear:session-1");
+      h.compacted.add("linear:session-1");
+    }
+    let gateUsed = false;
+    h.deps.sessions.getOrCreate = async (threadKey: string) => {
+      const result = await realGetOrCreate(threadKey);
+      if (!gateUsed) {
+        gateUsed = true;
+        await setupGate;
+      }
+      return result;
+    };
+
+    await h.agent.handle(createdEvent());
+    await new Promise((r) => setTimeout(r, 10));
+    void h.agent.handle(promptedEvent("", { agentActivity: { id: "stop-1", signal: "stop", content: { type: "prompt", body: "" } } }));
+    await new Promise((r) => setTimeout(r, 10));
+    releaseSetup();
+    await h.agent.idle();
+    assert.equal(h.asks.length, 0, "the stopped turn never asks");
+
+    await h.agent.handle(promptedEvent("after stop"));
+    await h.agent.idle();
+    assert.equal(h.asks.length, 1);
+    assert.equal(h.asks[0].isNewSession, true, `full instructions are sent (compacted=${startCompacted})`);
+  }
+});
+
+test("Stop mid-answer on a new session still sends full instructions next time", async () => {
+  const h = harness();
+  h.setAsk((opts) => {
+    if (opts.question.startsWith("<issue")) {
+      return new Promise<AskResult>((_resolve, reject) => {
+        opts.abortSignal?.addEventListener("abort", () => reject(new Error("Session aborted")));
+      });
+    }
+    return Promise.resolve(ANSWER);
+  });
+  await h.agent.handle(createdEvent());
+  await waitFor(() => h.asks.length === 1);
+  await h.agent.handle(promptedEvent("", { agentActivity: { id: "stop-1", signal: "stop", content: { type: "prompt", body: "" } } }));
+  await h.agent.idle();
+  await h.agent.handle(promptedEvent("after stop"));
+  await h.agent.idle();
+  assert.equal(h.asks[1].isNewSession, true);
 });
 
 test("a redelivered event is handled once", async () => {

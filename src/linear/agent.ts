@@ -286,8 +286,17 @@ export class LinearAgent {
     const { sessionId, isNew } = await this.deps.sessions.getOrCreate(threadKey);
     // After compaction, re-send the full instructions so the agent keeps its constraints.
     const needsFullContext = isNew || this.deps.sessions.isCompacted(threadKey);
+    // A stopped turn may never have delivered the full instructions. The
+    // compacted flag makes the next turn send them, which is harmless if they
+    // did get through.
+    const keepFullContextPending = (): void => {
+      if (needsFullContext) this.deps.sessions.setCompacted(threadKey, true);
+    };
+    if (turn.generation !== s.generation) {
+      keepFullContextPending();
+      return;
+    }
     if (!isNew && needsFullContext) this.deps.sessions.setCompacted(threadKey, false);
-    if (turn.generation !== s.generation) return;
 
     const tools = this.deps.getTools();
     const repo = this.deps.resolveRepo();
@@ -335,6 +344,7 @@ export class LinearAgent {
     } finally {
       progress.stop();
       if (run.stopRequested) {
+        keepFullContextPending();
         // Stop's abort may have landed before this prompt reached the server
         // (e.g. while the stream was still opening). Abort once more now that
         // the turn has settled, before the next turn can use the session.
