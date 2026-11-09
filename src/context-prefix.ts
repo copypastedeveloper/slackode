@@ -12,19 +12,13 @@ import type { SlackContext } from "./utils/slack-context.js";
 
 export type PrefixMode = "qa" | "coding" | "planning" | "minimal-coding" | "minimal-planning";
 
-/**
- * Set when the conversation comes from Linear instead of Slack. Changes the
- * formatting rules (Linear markdown, not Slack) and the context block (the
- * issue, not a Slack channel).
- */
+/** Set when the question comes from a Linear issue instead of Slack. */
 export interface LinearSurface {
   kind: "linear";
   issueIdentifier?: string;
   issueTitle?: string;
   issueUrl?: string;
   userEmail?: string;
-  /** Agent guidance configured by the Linear workspace's admins. */
-  guidance?: string;
 }
 
 export interface RepoInfo {
@@ -46,7 +40,7 @@ export interface PrefixOpts {
   tools?: string[];
   /** Q&A mode: resolved repo info for multi-repo. */
   repo?: RepoInfo;
-  /** Q&A mode: where the conversation happens. Omitted = Slack. */
+  /** Q&A mode: omitted for Slack. */
   surface?: LinearSurface;
 }
 
@@ -136,10 +130,8 @@ function buildQAInstructions(opts: PrefixOpts): string[] {
   if (onLinear) {
     lines.push(
       "",
-      "LINEAR:",
-      "You were @mentioned in, or delegated, a Linear issue. The issue and its comment thread are in the user's question.",
-      "- Scheduling tools are not available here. If asked to schedule or watch something, say that has to be set up from Slack.",
-      "- There is no Slack channel in this conversation: save memories with `global` or `repo` scope, never `channel`.",
+      "You were @mentioned in, or delegated, a Linear issue; the issue and its thread are in the user's question.",
+      "Scheduling isn't available from Linear (it has to be set up in Slack), and memories must use `global` or `repo` scope, not `channel`.",
     );
   }
 
@@ -288,16 +280,8 @@ function appendContextBlock(lines: string[], ctx: SlackContext): void {
 function appendLinearContextBlock(lines: string[], ctx: SlackContext, surface: LinearSurface): void {
   const email = surface.userEmail ? ` <${surface.userEmail}>` : "";
   lines.push(`User: ${ctx.userName}${email} (asking from Linear)`);
-  if (surface.issueIdentifier || surface.issueTitle) {
-    const label = [surface.issueIdentifier, surface.issueTitle].filter(Boolean).join(": ");
-    lines.push(`Linear issue: ${label}${surface.issueUrl ? ` (${surface.issueUrl})` : ""}`);
-  }
-  if (surface.guidance) {
-    lines.push(
-      "Agent guidance from the Linear workspace's admins:",
-      "<linear_guidance>", surface.guidance, "</linear_guidance>",
-    );
-  }
+  const issue = [surface.issueIdentifier, surface.issueTitle].filter(Boolean).join(": ");
+  if (issue) lines.push(`Linear issue: ${issue}${surface.issueUrl ? ` (${surface.issueUrl})` : ""}`);
 }
 
 function appendThreadContext(lines: string[], ctx: SlackContext): void {

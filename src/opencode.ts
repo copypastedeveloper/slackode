@@ -270,15 +270,10 @@ async function salvageBestEffortAnswer(
   activeBaseUrl: string,
   sessionId: string,
   agent?: string,
-  abortSignal?: AbortSignal,
 ): Promise<string> {
   const SALVAGE_TIMEOUT_MS = 2 * 60 * 1000;
   try {
     const { sseClient, stream: eventStream } = await openStream(activeBaseUrl);
-    if (abortSignal?.aborted) {
-      await eventStream.return(undefined);
-      return "";
-    }
     try {
       await activeClient.session.promptAsync({
         path: { id: sessionId },
@@ -301,7 +296,6 @@ async function salvageBestEffortAnswer(
       sessionId,
       sseClient,
       stream: eventStream,
-      abortSignal,
       budget: { deadlineAt: Date.now() + SALVAGE_TIMEOUT_MS },
     });
     return result.text.trim();
@@ -338,15 +332,6 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
   // Open the SSE subscription BEFORE promptAsync — otherwise the first events
   // (user message creation, first step-start) can fire before we're listening.
   const { sseClient, stream: eventStream } = await openStream(activeBaseUrl);
-
-  // Cancelled while the stream was opening: don't start work nobody will read.
-  if (abortSignal?.aborted) {
-    await eventStream.return(undefined);
-    recordTurnIfRequested(analytics, {
-      outcome: "aborted", question, agent, repoName: repo?.name, toolsEnabled: tools, sessionId,
-    });
-    throw new Error("Session aborted");
-  }
 
   try {
     await activeClient.session.promptAsync({
@@ -421,9 +406,8 @@ export async function askQuestion(opts: AskQuestionOpts): Promise<AskResult> {
 
     // Hit the cap while actively working: don't discard the research — ask the
     // agent to answer with what it has. The caller flags the answer as partial.
-    // Skip it if the user stopped the run: they don't want more work started.
-    if (wasActive && stream.diag.terminateReason === "timeout" && salvageOnTimeout && !abortSignal?.aborted) {
-      const salvaged = await salvageBestEffortAnswer(activeClient, activeBaseUrl, sessionId, agent, abortSignal);
+    if (wasActive && stream.diag.terminateReason === "timeout" && salvageOnTimeout) {
+      const salvaged = await salvageBestEffortAnswer(activeClient, activeBaseUrl, sessionId, agent);
       if (salvaged) {
         recordTurnIfRequested(analytics, {
           ...baseTurn,

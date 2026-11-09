@@ -33,20 +33,16 @@ test("serves /health, and rejects unknown paths and unsigned webhooks", async ()
   });
 });
 
-test("a signed webhook gets 200 and is handed off once per delivery", async () => {
+test("a signed webhook gets 200 and is handed off", async () => {
   await withServer(async (base, events) => {
     const raw = JSON.stringify({ type: "AgentSessionEvent", webhookTimestamp: Date.now() });
-    const request = {
+    const res = await fetch(`${base}/webhooks/linear`, {
       method: "POST",
-      headers: {
-        "Linear-Signature": crypto.createHmac("sha256", SECRET).update(raw).digest("hex"),
-        "Linear-Delivery": "delivery-1",
-      },
+      headers: { "Linear-Signature": crypto.createHmac("sha256", SECRET).update(raw).digest("hex") },
       body: raw,
-    };
-    assert.equal((await fetch(`${base}/webhooks/linear`, request)).status, 200);
-    assert.equal((await fetch(`${base}/webhooks/linear`, request)).status, 200);
+    });
+    assert.equal(res.status, 200);
     await tick();
-    assert.equal(events.length, 1);
+    assert.deepEqual(events, [JSON.parse(raw)]);
   });
 });

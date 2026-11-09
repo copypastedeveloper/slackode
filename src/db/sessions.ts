@@ -45,7 +45,6 @@ export function deleteSessionMapping(threadKey: string): void {
 export async function getOrCreateSession(
   threadKey: string,
   channelId?: string,
-  title: string = `Slack thread: ${threadKey}`,
 ): Promise<{ sessionId: string; isNew: boolean }> {
   const existing = getSessionId(threadKey);
   if (existing) {
@@ -55,7 +54,7 @@ export async function getOrCreateSession(
     console.warn(`[sessions] Session ${existing} for thread ${threadKey} no longer exists in OpenCode; starting a fresh one.`);
   }
 
-  const sessionId = await createSession(title);
+  const sessionId = await createSession(`Slack thread: ${threadKey}`);
   saveSession(threadKey, sessionId, channelId);
 
   return { sessionId, isNew: true };

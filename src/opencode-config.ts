@@ -243,30 +243,18 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
     }
   }
 
-  // Linear surface: one agent with the Q&A build agent's permissions plus the
-  // tools listed in LINEAR_AGENT_TOOLS. Scheduler tools are off — they take
-  // Slack channel/user IDs, which a Linear conversation doesn't have.
+  // Linear agent: the Q&A build agent plus LINEAR_AGENT_TOOLS, without the
+  // scheduler tools (they need Slack channel/user IDs).
   const linearConfig = readLinearConfig();
   if (linearConfig && config.agent.build) {
     const buildAgent = config.agent.build;
-    const linearTools = linearConfig.tools.filter((t) => enabled.includes(t));
-    const skipped = linearConfig.tools.filter((t) => !enabled.includes(t));
-    if (skipped.length > 0) {
-      console.warn(`[config] LINEAR_AGENT_TOOLS lists tools that aren't enabled or authorized: ${skipped.join(", ")}`);
-    }
     const toolOverrides: Record<string, boolean> = {};
-    for (const t of linearTools) addToolEnables(toolOverrides, t);
+    for (const t of linearConfig.tools.filter((name) => enabled.includes(name))) addToolEnables(toolOverrides, t);
     config.agent[LINEAR_AGENT_NAME] = {
       description: `${buildAgent.description} (Linear)`,
       tools: { ...buildAgent.tools, ...toolOverrides, "scheduler*": false },
-      permission: {
-        ...buildAgent.permission,
-        external_directory: {
-          "/app/repos/*": "allow",
-        },
-      },
+      permission: { ...buildAgent.permission, external_directory: { "/app/repos/*": "allow" } },
     };
-    console.log(`[config] Linear agent configured${linearTools.length ? ` with ${linearTools.join(", ")}` : ""}.`);
   }
 
   // In code mode, switch to the write-enabled "code" agent and enable write tools

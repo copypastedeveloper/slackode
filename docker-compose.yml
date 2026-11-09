@@ -2,10 +2,6 @@ services:
   bot:
     build: .
     env_file: .env
-    # Linear agent (optional): publish the webhook listener. Put it behind
-    # HTTPS and expose only POST /webhooks/linear publicly.
-    # ports:
-    #   - "8080:8080"
     volumes:
       - repo-cache:/app/repo
       - repos-cache:/app/repos

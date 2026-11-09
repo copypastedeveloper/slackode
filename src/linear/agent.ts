@@ -1,49 +1,41 @@
 /**
- * Linear agent surface: turns Linear agent-session webhooks into OpenCode
- * Q&A turns and posts the results back as agent activities.
- *
- * One Linear agent session maps to one OpenCode session (thread key
- * `linear:<agentSessionId>`), so follow-up replies in the issue thread keep
- * their context the way Slack thread replies do. Turns within a session run
- * one at a time; follow-ups queue behind the current answer.
+ * Linear agent: turns agent-session webhooks into OpenCode Q&A turns and posts
+ * the answers back as agent activities. Each Linear agent session maps to one
+ * OpenCode session (`linear:<agentSessionId>`), so replies in the issue thread
+ * keep their context. Turns in a session run one at a time.
  */
 import type { AskQuestionOpts, AskResult } from "../opencode.js";
 import type { RepoInfo } from "../context-prefix.js";
-import { ActivityQueue, type ActivityContent, type LinearApi, type LinearIdentity } from "./client.js";
+import { ActivityQueue, type LinearApi, type LinearIdentity } from "./client.js";
 import { LINEAR_CHANNEL_ID } from "./config.js";
 
-// ── Webhook payload (the fields we use) ──
-
-interface LinearUserRef {
+interface LinearUser {
   id?: string;
   name?: string;
-  displayName?: string;
   email?: string;
 }
 
-export interface AgentSessionEventPayload {
+/** The fields of an `AgentSessionEvent` webhook we use. */
+interface AgentSessionEvent {
   type?: string;
   action?: string;
   organizationId?: string;
   appUserId?: string;
   promptContext?: string;
-  guidance?: unknown;
   agentSession?: {
     id?: string;
-    url?: string;
-    creator?: LinearUserRef | null;
-    issue?: { id?: string; identifier?: string; title?: string; url?: string; description?: string | null } | null;
-    comment?: { body?: string | null } | null;
+    creator?: LinearUser | null;
+    issue?: { identifier?: string; title?: string; url?: string } | null;
   };
   agentActivity?: {
     id?: string;
     signal?: string | null;
-    content?: { type?: string; body?: string | null } | null;
-    user?: LinearUserRef | null;
+    content?: { body?: string | null } | null;
+    user?: LinearUser | null;
   } | null;
 }
 
-/** Who is asking and about which issue — feeds the context prefix. */
+/** Who is asking and about which issue; feeds the context prefix. */
 export interface LinearTurnContext {
   userId?: string;
   userName: string;
@@ -51,15 +43,12 @@ export interface LinearTurnContext {
   issueIdentifier?: string;
   issueTitle?: string;
   issueUrl?: string;
-  /** Workspace/team agent guidance configured by Linear admins. */
-  guidance?: string;
 }
 
 export interface LinearAgentDeps {
   linear: LinearApi;
-  /** The app's own identity in the workspace; events for anyone else are dropped. */
   getIdentity: () => Promise<LinearIdentity>;
-  /** Resolves once OpenCode is serving. Events that arrive during boot wait for it. */
+  /** Resolves once OpenCode is serving; events that arrive during boot wait for it. */
   ready: Promise<void>;
   ask: (opts: AskQuestionOpts) => Promise<AskResult>;
   abortServerSide: (sessionId: string) => Promise<void>;
@@ -69,14 +58,12 @@ export interface LinearAgentDeps {
     isCompacted: (threadKey: string) => boolean;
     setCompacted: (threadKey: string, compacted: boolean) => void;
   };
-  server: { isRestarting: () => boolean; waitForRestart: () => Promise<void> };
+  waitForRestart: () => Promise<void>;
   buildContextPrefix: (ctx: LinearTurnContext, opts: { isNew: boolean; tools: string[]; repo?: RepoInfo }) => string;
   resolveRepo: () => RepoInfo | undefined;
-  /** Effective MCP tools for the Linear agent, resolved per turn (tool config can change at runtime). */
   getTools: () => string[];
   agentName: string;
   turnCapMs: number;
-  progressIntervalMs?: number;
   activityRetryDelaysMs?: number[];
   identityRetryDelaysMs?: number[];
 }
@@ -87,39 +74,29 @@ interface Turn {
   ctx: LinearTurnContext;
 }
 
-interface RunHandle {
+interface Run {
   controller: AbortController;
   sessionId: string;
   stopRequested: boolean;
-  /** Stop's immediate server-side abort; the turn waits for it before finishing. */
   serverAbort?: Promise<void>;
 }
 
-interface SessionState {
+interface Session {
   id: string;
   activities: ActivityQueue;
   queue: Turn[];
   running: boolean;
-  /** Bumped by stop: every turn from an older generation is dropped. */
+  /** Bumped by Stop; turns from an older generation are dropped. */
   generation: number;
-  current?: RunHandle;
-  ctx: LinearTurnContext;
-  lastUsed: number;
+  current?: Run;
 }
 
+const STOPPED = "Stopped. I won't take any further action on this.";
+const CAPPED_NOTE = "> ⚠️ I hit my time limit, so this is my best answer from what I gathered. It may be incomplete.\n\n";
 const SEEN_LIMIT = 1000;
-const SESSION_IDLE_EVICT_MS = 6 * 60 * 60 * 1000;
-const PROGRESS_THOUGHT_MAX_CHARS = 2000;
-const CAPPED_NOTE =
-  "> ⚠️ I hit my time limit before finishing the research, so this is my best answer from what I gathered. It may be incomplete.\n\n";
-const GENERIC_FAILURE = "Sorry, something went wrong while I was answering. Please try again.";
-
-export function threadKeyFor(agentSessionId: string): string {
-  return `linear:${agentSessionId}`;
-}
 
 export class LinearAgent {
-  private readonly sessions = new Map<string, SessionState>();
+  private readonly sessions = new Map<string, Session>();
   private readonly seen = new Set<string>();
 
   constructor(private readonly deps: LinearAgentDeps) {}
@@ -127,142 +104,98 @@ export class LinearAgent {
   /** Entry point for a verified webhook payload. Never throws. */
   async handle(payload: unknown): Promise<void> {
     try {
-      await this.handleEvent(payload as AgentSessionEventPayload);
+      await this.handleEvent(payload as AgentSessionEvent);
     } catch (err) {
       console.error("[linear] Failed to handle webhook event:", err);
     }
   }
 
-  /** Resolves when no session has queued or running work (used by tests). */
+  /** Resolves once no turn is queued or running (for tests). */
   async idle(): Promise<void> {
-    for (;;) {
-      const busy = [...this.sessions.values()].filter((s) => s.running || s.queue.length > 0);
-      if (busy.length === 0) break;
+    while ([...this.sessions.values()].some((s) => s.running || s.queue.length > 0)) {
       await new Promise((r) => setTimeout(r, 5));
     }
     await Promise.all([...this.sessions.values()].map((s) => s.activities.flush()));
   }
 
-  private async handleEvent(p: AgentSessionEventPayload): Promise<void> {
-    if (p?.type !== "AgentSessionEvent") return;
-    const agentSessionId = p.agentSession?.id;
-    if (!agentSessionId) return;
+  private async handleEvent(e: AgentSessionEvent): Promise<void> {
+    const id = e?.type === "AgentSessionEvent" ? e.agentSession?.id : undefined;
+    if (!id) return;
 
-    const identity = await this.identityWithRetry();
-    if (p.organizationId !== identity.organizationId) {
-      console.warn(`[linear] Ignoring event for organization ${p.organizationId ?? "(none)"}`);
+    const me = await this.identity();
+    if (e.organizationId !== me.organizationId || (e.appUserId && e.appUserId !== me.appUserId)) {
+      console.warn("[linear] Ignoring an event for another workspace or app");
       return;
     }
-    if (p.appUserId && p.appUserId !== identity.appUserId) {
-      console.warn(`[linear] Ignoring event addressed to app user ${p.appUserId}`);
-      return;
-    }
-    if (this.isDuplicate(p, agentSessionId)) return;
 
-    const s = this.session(agentSessionId);
-    s.ctx = mergeContext(s.ctx, contextFrom(p));
+    // Linear retries deliveries; handle each event once.
+    const key = `${e.action}:${e.agentActivity?.id ?? id}`;
+    if (this.seen.has(key)) return;
+    this.seen.add(key);
+    if (this.seen.size > SEEN_LIMIT) this.seen.delete(this.seen.values().next().value!);
 
-    if (p.action === "prompted" && p.agentActivity?.signal === "stop") {
+    const s = this.session(id);
+    if (e.action === "prompted" && e.agentActivity?.signal === "stop") {
       await this.stop(s);
       return;
     }
 
     let question: string;
-    if (p.action === "created") {
-      // Linear marks a session unresponsive without an activity within ~10s.
+    if (e.action === "created") {
+      // Linear marks the session unresponsive without an activity within ~10s.
       void s.activities.push({ type: "thought", body: "Looking into this…" });
-      question = questionFromCreated(p);
-    } else if (p.action === "prompted") {
-      question = p.agentActivity?.content?.body?.trim() ?? "";
+      question = e.promptContext?.trim() ?? "";
+    } else if (e.action === "prompted") {
+      question = e.agentActivity?.content?.body?.trim() ?? "";
       if (!question) return;
-      void s.activities.push(
-        {
-          type: "thought",
-          body: s.running ? "Got it. I'll pick this up when I finish the current answer." : "Looking into this…",
-        },
-        { ephemeral: true },
-      );
+      const ack = s.running ? "Got it. I'll pick this up after the current answer." : "Looking into this…";
+      void s.activities.push({ type: "thought", body: ack }, { ephemeral: true });
     } else {
       return;
     }
-
     if (!question) {
-      void s.activities.push({ type: "error", body: "I couldn't find a question in that. Mention me with what you'd like to know." });
+      void s.activities.push({ type: "error", body: "I couldn't find a question to answer." });
       return;
     }
 
-    s.queue.push({ question, generation: s.generation, ctx: { ...s.ctx } });
+    s.queue.push({ question, generation: s.generation, ctx: contextFrom(e) });
     void this.pump(s);
   }
 
-  /**
-   * The webhook has already been acknowledged, so a brief Linear API blip
-   * while fetching the app's identity mustn't drop the event. Retry before
-   * giving up.
-   */
-  private async identityWithRetry(): Promise<LinearIdentity> {
+  /** The webhook was already acknowledged, so retry a failed identity lookup before dropping the event. */
+  private async identity(): Promise<LinearIdentity> {
     const delays = this.deps.identityRetryDelaysMs ?? [1_000, 3_000];
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.deps.getIdentity();
       } catch (err) {
         if (attempt >= delays.length) throw err;
-        console.warn(
-          `[linear] Fetching the app identity failed (attempt ${attempt + 1}), retrying:`,
-          err instanceof Error ? err.message : err,
-        );
         await new Promise((r) => setTimeout(r, delays[attempt]));
       }
     }
   }
 
-  private isDuplicate(p: AgentSessionEventPayload, agentSessionId: string): boolean {
-    const key = `${p.action}:${p.agentActivity?.id ?? agentSessionId}`;
-    if (this.seen.has(key)) return true;
-    this.seen.add(key);
-    if (this.seen.size > SEEN_LIMIT) {
-      const oldest = this.seen.values().next().value;
-      if (oldest !== undefined) this.seen.delete(oldest);
-    }
-    return false;
-  }
-
-  private session(id: string): SessionState {
-    const now = Date.now();
+  private session(id: string): Session {
     let s = this.sessions.get(id);
     if (!s) {
-      this.evictIdle(now);
       s = {
         id,
         activities: new ActivityQueue(this.deps.linear, id, this.deps.activityRetryDelaysMs),
         queue: [],
         running: false,
         generation: 0,
-        ctx: { userName: "A Linear user" },
-        lastUsed: now,
       };
       this.sessions.set(id, s);
     }
-    s.lastUsed = now;
     return s;
-  }
-
-  private evictIdle(now: number): void {
-    for (const [id, s] of this.sessions) {
-      if (!s.running && s.queue.length === 0 && now - s.lastUsed > SESSION_IDLE_EVICT_MS) {
-        this.sessions.delete(id);
-      }
-    }
   }
 
   /**
    * Cancel the running turn and drop queued ones. The server-side abort starts
-   * now, so a long tool call ends promptly, but the running turn itself waits
-   * for it (see runTurn). Turns in a session run one at a time, so a reply
-   * sent after Stop can't start until the abort has landed and can't be
-   * cancelled by it.
+   * now so a long tool call ends promptly; the running turn waits for it before
+   * finishing, so the next turn can't start (and be cancelled by it) until it lands.
    */
-  private async stop(s: SessionState): Promise<void> {
+  private async stop(s: Session): Promise<void> {
     s.generation += 1;
     const run = s.current;
     const hadWork = Boolean(run) || s.queue.length > 0;
@@ -272,13 +205,10 @@ export class LinearAgent {
       run.controller.abort();
       run.serverAbort = this.deps.abortServerSide(run.sessionId);
     }
-    await s.activities.push({
-      type: "response",
-      body: hadWork ? "Stopped. I won't take any further action on this." : "Nothing was running, so there was nothing to stop.",
-    });
+    await s.activities.push({ type: "response", body: hadWork ? STOPPED : "Nothing was running, so there was nothing to stop." });
   }
 
-  private async pump(s: SessionState): Promise<void> {
+  private async pump(s: Session): Promise<void> {
     if (s.running) return;
     s.running = true;
     try {
@@ -290,220 +220,94 @@ export class LinearAgent {
         } catch (err) {
           console.error(`[linear] ${s.id}: turn failed:`, err);
           if (turn.generation === s.generation) {
-            void s.activities.push({ type: "error", body: GENERIC_FAILURE });
+            void s.activities.push({ type: "error", body: "Sorry, something went wrong while I was answering. Please try again." });
           }
         }
       }
     } finally {
       s.running = false;
+      if (s.queue.length === 0) this.sessions.delete(s.id);
     }
   }
 
-  private async runTurn(s: SessionState, turn: Turn): Promise<void> {
+  private async runTurn(s: Session, turn: Turn): Promise<void> {
     await this.deps.ready;
-    if (this.deps.server.isRestarting()) await this.deps.server.waitForRestart();
+    await this.deps.waitForRestart();
     if (turn.generation !== s.generation) return;
 
-    const threadKey = threadKeyFor(s.id);
+    const threadKey = `linear:${s.id}`;
     const { sessionId, isNew } = await this.deps.sessions.getOrCreate(threadKey);
-    // After compaction, re-send the full instructions so the agent keeps its constraints.
+    // New or compacted sessions get the full instructions, as in Slack. If this
+    // turn fails or is stopped, keep them owed so the next turn still sends them.
     const needsFullContext = isNew || this.deps.sessions.isCompacted(threadKey);
-    // A stopped turn may never have delivered the full instructions. The
-    // compacted flag makes the next turn send them, which is harmless if they
-    // did get through.
-    const keepFullContextPending = (): void => {
+    const keepFullContextOwed = () => {
       if (needsFullContext) this.deps.sessions.setCompacted(threadKey, true);
     };
-    if (turn.generation !== s.generation) {
-      keepFullContextPending();
-      return;
-    }
+    if (turn.generation !== s.generation) return keepFullContextOwed();
     if (!isNew && needsFullContext) this.deps.sessions.setCompacted(threadKey, false);
 
     const tools = this.deps.getTools();
     const repo = this.deps.resolveRepo();
-    const run: RunHandle = { controller: new AbortController(), sessionId, stopRequested: false };
+    const run: Run = { controller: new AbortController(), sessionId, stopRequested: false };
     s.current = run;
-    const progress = this.progressReporter(s);
-
-    const askOpts: AskQuestionOpts = {
-      sessionId,
-      question: turn.question,
-      customContextPrefix: this.deps.buildContextPrefix(turn.ctx, { isNew: needsFullContext, tools, repo }),
-      isNewSession: needsFullContext,
-      agent: this.deps.agentName,
-      tools,
-      repo,
-      onProgress: progress.update,
-      abortSignal: run.controller.signal,
-      budget: { deadlineAt: Date.now() + this.deps.turnCapMs },
-      salvageOnTimeout: true,
-      analytics: {
-        userId: turn.ctx.userId ? `linear:${turn.ctx.userId}` : "linear:unknown",
-        channelId: LINEAR_CHANNEL_ID,
-        channelName: turn.ctx.issueIdentifier ? `Linear ${turn.ctx.issueIdentifier}` : "Linear",
-        threadKey,
-      },
-    };
 
     let result: AskResult | undefined;
     try {
-      try {
-        result = await this.deps.ask(askOpts);
-      } catch (err) {
-        // Stop already aborted the run and posted its response.
-        if (run.stopRequested && isAbortError(err)) return;
-        // A tool-config change restarted OpenCode mid-turn: wait it out and retry once.
-        if (this.deps.server.isRestarting()) {
-          await this.deps.server.waitForRestart();
-          if (turn.generation !== s.generation) return;
-          askOpts.budget = { deadlineAt: Date.now() + this.deps.turnCapMs };
-          result = await this.deps.ask(askOpts);
-        } else {
-          throw err;
-        }
-      }
+      result = await this.deps.ask({
+        sessionId,
+        question: turn.question,
+        customContextPrefix: this.deps.buildContextPrefix(turn.ctx, { isNew: needsFullContext, tools, repo }),
+        isNewSession: needsFullContext,
+        agent: this.deps.agentName,
+        tools,
+        repo,
+        abortSignal: run.controller.signal,
+        budget: { deadlineAt: Date.now() + this.deps.turnCapMs },
+        salvageOnTimeout: true,
+        analytics: {
+          userId: `linear:${turn.ctx.userId ?? "unknown"}`,
+          channelId: LINEAR_CHANNEL_ID,
+          channelName: `Linear ${turn.ctx.issueIdentifier ?? ""}`.trim(),
+          threadKey,
+        },
+      });
+    } catch (err) {
+      const aborted = err instanceof Error && err.message === "Session aborted";
+      if (!(run.stopRequested && aborted)) throw err;
     } finally {
-      progress.stop();
-      // The turn didn't complete (it threw, or was stopped), so the full
-      // instructions may never have reached the session.
-      if (!result || run.stopRequested) keepFullContextPending();
+      if (!result || run.stopRequested) keepFullContextOwed();
       if (run.stopRequested) {
-        // Stop's abort may have landed before this prompt reached the server
-        // (e.g. while the stream was still opening). Abort once more now that
-        // the turn has settled, before the next turn can use the session.
+        // The prompt may have reached the server after Stop's abort (e.g. while
+        // the stream was still opening): abort once more before the next turn.
         await run.serverAbort?.catch(() => {});
         await this.deps.abortServerSide(sessionId).catch(() => {});
       }
-      if (s.current === run) s.current = undefined;
+      s.current = undefined;
     }
     if (!result) return;
 
-    if (result.deadSession) {
-      // The session never started the turn; retire the mapping so the next message gets a fresh one.
-      this.deps.sessions.remove(threadKey);
-      console.warn(`[linear] Retired wedged session mapping for ${threadKey} (session ${sessionId})`);
-    }
+    // Same session bookkeeping as the Slack path.
+    if (result.deadSession) this.deps.sessions.remove(threadKey);
     if (result.compacted) this.deps.sessions.setCompacted(threadKey, true);
     if (turn.generation !== s.generation) return;
 
-    const content: ActivityContent = result.failed
-      ? { type: "error", body: result.text }
-      : { type: "response", body: result.capped ? CAPPED_NOTE + result.text : result.text };
-    await s.activities.push(content);
-  }
-
-  /** Throttled, ephemeral progress activities while a turn runs. */
-  private progressReporter(s: SessionState): { update: (status: string) => void; stop: () => void } {
-    const intervalMs = this.deps.progressIntervalMs ?? 5_000;
-    let lastSent = 0;
-    let pending: string | null = null;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let stopped = false;
-
-    const flush = (): void => {
-      if (stopped || pending === null) return;
-      const content = progressActivity(pending);
-      pending = null;
-      lastSent = Date.now();
-      if (content) void s.activities.push(content, { ephemeral: true });
-    };
-
-    return {
-      update: (status: string) => {
-        if (stopped) return;
-        pending = status;
-        const elapsed = Date.now() - lastSent;
-        if (elapsed >= intervalMs) {
-          flush();
-        } else if (!timer) {
-          timer = setTimeout(() => {
-            timer = null;
-            flush();
-          }, intervalMs - elapsed);
-        }
-      },
-      stop: () => {
-        stopped = true;
-        pending = null;
-        if (timer) clearTimeout(timer);
-        timer = null;
-      },
-    };
+    await s.activities.push(
+      result.failed
+        ? { type: "error", body: result.text }
+        : { type: "response", body: result.capped ? CAPPED_NOTE + result.text : result.text },
+    );
   }
 }
 
-// ── Helpers ──
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && err.message === "Session aborted";
-}
-
-const USING_TOOLS_RE = /_Using: (.+?)\.\.\._\s*$/;
-
-/**
- * Map a progress status from the OpenCode stream (latest draft text, possibly
- * followed by `_Using: tool, tool..._`) to an ephemeral Linear activity.
- */
-export function progressActivity(status: string): ActivityContent | null {
-  const using = status.match(USING_TOOLS_RE);
-  if (using) return { type: "action", action: "Using", parameter: using[1] };
-  const text = status.trim();
-  if (!text) return null;
-  const body = text.length > PROGRESS_THOUGHT_MAX_CHARS ? `${text.slice(0, PROGRESS_THOUGHT_MAX_CHARS)}…` : text;
-  return { type: "thought", body };
-}
-
-/** The question for a new session: Linear's own prompt context (issue + thread), or a fallback built from the session. */
-export function questionFromCreated(p: AgentSessionEventPayload): string {
-  const promptContext = p.promptContext?.trim();
-  if (promptContext) return promptContext;
-  const parts: string[] = [];
-  const issue = p.agentSession?.issue;
-  if (issue) {
-    parts.push([issue.identifier, issue.title].filter(Boolean).join(": "));
-    if (issue.description) parts.push(issue.description);
-  }
-  const comment = p.agentSession?.comment?.body;
-  if (comment) parts.push(comment);
-  return parts.filter(Boolean).join("\n\n").trim();
-}
-
-function contextFrom(p: AgentSessionEventPayload): Partial<LinearTurnContext> {
-  const user = (p.action === "prompted" ? p.agentActivity?.user : undefined) ?? p.agentSession?.creator ?? undefined;
-  const issue = p.agentSession?.issue ?? undefined;
+function contextFrom(e: AgentSessionEvent): LinearTurnContext {
+  const user = (e.action === "prompted" ? e.agentActivity?.user : null) ?? e.agentSession?.creator ?? undefined;
+  const issue = e.agentSession?.issue ?? undefined;
   return {
     userId: user?.id,
-    userName: user?.name ?? user?.displayName,
+    userName: user?.name ?? "A Linear user",
     userEmail: user?.email,
     issueIdentifier: issue?.identifier,
     issueTitle: issue?.title,
-    issueUrl: issue?.url ?? p.agentSession?.url,
-    guidance: guidanceText(p.guidance),
+    issueUrl: issue?.url,
   };
-}
-
-function mergeContext(base: LinearTurnContext, update: Partial<LinearTurnContext>): LinearTurnContext {
-  const merged: LinearTurnContext = { ...base };
-  for (const [k, v] of Object.entries(update) as Array<[keyof LinearTurnContext, string | undefined]>) {
-    if (v) merged[k] = v;
-  }
-  return merged;
-}
-
-/** Guidance arrives as a list of rules; keep whatever text they carry. */
-function guidanceText(guidance: unknown): string | undefined {
-  if (!Array.isArray(guidance)) return undefined;
-  const bodies = guidance
-    .map((g) => {
-      if (typeof g === "string") return g;
-      if (g && typeof g === "object") {
-        const body = (g as { body?: unknown; content?: unknown }).body ?? (g as { content?: unknown }).content;
-        return typeof body === "string" ? body : "";
-      }
-      return "";
-    })
-    .map((b) => b.trim())
-    .filter(Boolean);
-  return bodies.length > 0 ? bodies.join("\n\n") : undefined;
 }

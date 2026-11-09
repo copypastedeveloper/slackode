@@ -366,37 +366,11 @@ Stats are read-only and open to all users. Threads are the headline metric (coun
 
 ### Linear agent (optional)
 
-Slackode can also answer questions inside [Linear](https://linear.app). People @mention it in an issue comment, or delegate an issue to it, and the answer comes back in the issue thread. It uses Linear's [agent platform](https://linear.app/developers/agents):
+People can also @mention Slackode in a Linear issue comment, or delegate an issue to it, and get the answer in the issue thread. It uses Linear's [agent platform](https://linear.app/developers/agents). Replies continue the conversation and **Stop** cancels a run. It runs the same read-only Q&A as Slack, without the scheduler tools.
 
-- While it works, Linear shows its progress in the agent session view.
-- Replies in the thread continue the same conversation.
-- The **Stop** button cancels a run.
+Linear only delivers events by webhook, so enabling it opens `LINEAR_WEBHOOK_PORT` (default `8080`). Expose only `POST /webhooks/linear`, over HTTPS; `GET /health` is for a load balancer.
 
-It's off unless `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` and `LINEAR_WEBHOOK_SECRET` are all set.
-
-Unlike Slack's Socket Mode, Linear can only deliver events by webhook, so turning this on opens a port (`LINEAR_WEBHOOK_PORT`, default `8080`). Expose only `POST /webhooks/linear` to the internet, behind HTTPS. `GET /health` is for your load balancer.
-
-**Setup** (a Linear workspace admin has to do it):
-
-1. In Linear, open **Settings → API → Applications → New**.
-   - Give the app a name and icon (`assets/icon.svg`).
-   - Enter any callback URL; slackode doesn't use it.
-   - Turn on **Client credentials**.
-   - Turn on **Webhooks**: set the URL to `https://<your-host>/webhooks/linear` and tick **Agent session events**.
-2. Copy the client ID, client secret and webhook signing secret into `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` and `LINEAR_WEBHOOK_SECRET`.
-3. Optional: set `LINEAR_AGENT_TOOLS` to the MCP tools the Linear agent may use, e.g. `linear,sentry`. They must already be enabled with `tool set-key`.
-4. Restart slackode. The log shows `[linear] Signed in as app user …` once it has a token.
-5. Mention the app in an issue comment to try it.
-
-**How it behaves**
-
-- On startup, slackode trades the client credentials for an app token. The token acts as the app itself, not a person, and is renewed automatically.
-- Each Linear agent session becomes its own OpenCode session (thread key `linear:<agentSessionId>`).
-- The agent runs read-only Q&A, as in Slack. It answers in Linear Markdown and can't use the scheduler tools, which need Slack channel IDs.
-- Events from other Linear workspaces, and events addressed to other apps, are ignored.
-- Repo routing uses the pseudo channel `linear`, so `repo` commands that set a channel's repo don't apply. The default repo is used. Turns show up in `stats` under channel `linear`.
-
-See [docs/linear-agent-design.md](docs/linear-agent-design.md) for the design.
+To set it up, a Linear workspace admin creates an app under **Settings → API → Applications**. Turn on **Client credentials**, and turn on webhooks to `https://<your-host>/webhooks/linear` with **Agent session events**. Then set `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` and `LINEAR_WEBHOOK_SECRET` (all three, or it stays off), plus optionally `LINEAR_AGENT_TOOLS` (e.g. `linear,sentry`).
 
 ## Architecture
 
@@ -437,7 +411,6 @@ See [docs/linear-agent-design.md](docs/linear-agent-design.md) for the design.
 **Agent types:**
 - `build` — Read-only Q&A (default)
 - `build-<tools>` — Q&A with MCP tools (e.g. `build-linear-sentry`)
-- `linear` — Q&A for the Linear agent: `build` plus `LINEAR_AGENT_TOOLS`, without scheduler tools (only when the Linear agent is enabled)
 - `code` — Code-writing agent (used in coding sessions)
 - `context` — Generates repo context files
 - `enrich` — Fetches external context for coding sessions (tickets, errors)
@@ -507,11 +480,6 @@ For local MCP servers:
 | `CONFIG_ENCRYPTION_KEY` | No | 64-char hex key for AES-256-GCM encryption of tool API keys |
 | `OPENCODE_URL` | No | OpenCode server URL (default: `http://127.0.0.1:4096`) |
 | `SESSIONS_DB_PATH` | No | Path to sessions SQLite DB |
-| `LINEAR_CLIENT_ID` | For the Linear agent | Linear OAuth app client ID |
-| `LINEAR_CLIENT_SECRET` | For the Linear agent | Linear OAuth app client secret (client credentials must be enabled on the app) |
-| `LINEAR_WEBHOOK_SECRET` | For the Linear agent | Webhook signing secret from the Linear app |
-| `LINEAR_WEBHOOK_PORT` | No | Port for the Linear webhook listener (default: `8080`) |
-| `LINEAR_AGENT_TOOLS` | No | Comma-separated MCP tools the Linear agent may use (e.g. `linear,sentry`) |
 
 ### Providers
 
@@ -631,7 +599,6 @@ src/
 - Explicit tmpfs mounts for `/tmp` and runtime directories
 - OpenCode servers bind to `127.0.0.1` — not accessible outside the container
 - Coding sessions use isolated git worktrees
-- The optional Linear webhook listener checks every request. It verifies the HMAC-SHA256 signature over the raw body and only accepts a `webhookTimestamp` within 60 seconds. Anything else gets a 401, and request bodies are never logged.
 
 **Credential handling**
 - Git credentials supplied via `GIT_ASKPASS` — never in URLs or `.git/config`
