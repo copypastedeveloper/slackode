@@ -190,6 +190,36 @@ test("stop aborts the running turn and drops queued follow-ups", async () => {
   assert.deepEqual(responses, [{ type: "response", body: "Stopped. I won't take any further action on this." }]);
 });
 
+test("a reply sent right after Stop waits for the server-side abort", async () => {
+  let releaseAbort!: () => void;
+  const abortGate = new Promise<void>((r) => { releaseAbort = r; });
+  const h = harness({ abortServerSide: () => abortGate });
+  h.setAsk((opts) => {
+    if (opts.question.startsWith("<issue")) {
+      return new Promise<AskResult>((_resolve, reject) => {
+        opts.abortSignal?.addEventListener("abort", () => reject(new Error("Session aborted")));
+      });
+    }
+    return Promise.resolve({ ...ANSWER, text: "answer after stop" });
+  });
+
+  await h.agent.handle(createdEvent());
+  await waitFor(() => h.asks.length === 1);
+  // The webhook server doesn't await handle(); neither do we, so the stop is still in flight.
+  void h.agent.handle(promptedEvent("", { agentActivity: { id: "stop-1", signal: "stop", content: { type: "prompt", body: "" } } }));
+  void h.agent.handle(promptedEvent("new question"));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(h.asks.length, 1, "the new turn must not start while the abort is pending");
+
+  releaseAbort();
+  await h.agent.idle();
+  assert.equal(h.asks.length, 2);
+  assert.deepEqual(
+    durable(h.posted).filter((c) => c.type === "response").map((c) => (c as { body: string }).body),
+    ["Stopped. I won't take any further action on this.", "answer after stop"],
+  );
+});
+
 test("a redelivered event is handled once", async () => {
   const h = harness();
   await h.agent.handle(createdEvent());

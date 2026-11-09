@@ -3,6 +3,7 @@
  * from the OAuth client-credentials grant, and the two mutations the agent
  * needs. Uses fetch directly so the image picks up no new dependencies.
  */
+import { randomUUID } from "node:crypto";
 
 const API_URL = "https://api.linear.app/graphql";
 const TOKEN_URL = "https://api.linear.app/oauth/token";
@@ -22,6 +23,11 @@ export type ActivityContent =
 export interface ActivityOpts {
   /** Only thoughts and actions may be ephemeral; the next activity replaces them. */
   ephemeral?: boolean;
+  /**
+   * Caller-chosen activity ID. Sent unchanged on every retry so a request that
+   * succeeded but whose response was lost can't post the activity twice.
+   */
+  id?: string;
 }
 
 /** The slice of the Linear API the agent depends on (faked in tests). */
@@ -90,14 +96,14 @@ export class LinearClient implements LinearApi {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
       body: JSON.stringify({ query, variables }),
     });
+    if (res.status === 401 && !retried) return this.graphql<T>(query, variables, true);
     let body: { data?: T; errors?: Array<{ message?: string; extensions?: { code?: string } }> };
     try {
       body = (await res.json()) as typeof body;
     } catch {
       throw new Error(`Linear GraphQL error: HTTP ${res.status} (non-JSON response)`);
     }
-    const authFailed =
-      res.status === 401 || body.errors?.some((e) => e.extensions?.code === "AUTHENTICATION_ERROR");
+    const authFailed = body.errors?.some((e) => e.extensions?.code === "AUTHENTICATION_ERROR");
     if (authFailed && !retried) return this.graphql<T>(query, variables, true);
     if (!res.ok || body.errors?.length || !body.data) {
       const messages = body.errors?.map((e) => e.message).filter(Boolean).join("; ");
@@ -122,7 +128,14 @@ export class LinearClient implements LinearApi {
       `mutation SlackodeActivity($input: AgentActivityCreateInput!) {
         agentActivityCreate(input: $input) { success }
       }`,
-      { input: { agentSessionId, content, ...(opts.ephemeral ? { ephemeral: true } : {}) } },
+      {
+        input: {
+          agentSessionId,
+          content,
+          ...(opts.id ? { id: opts.id } : {}),
+          ...(opts.ephemeral ? { ephemeral: true } : {}),
+        },
+      },
     );
   }
 }
@@ -143,7 +156,7 @@ export class ActivityQueue {
   ) {}
 
   push(content: ActivityContent, opts: ActivityOpts = {}): Promise<void> {
-    this.items.push({ content, opts });
+    this.items.push({ content, opts: { ...opts, id: opts.id ?? randomUUID() } });
     this.tail = this.tail.then(() => this.sendNext());
     return this.tail;
   }
