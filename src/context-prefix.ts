@@ -12,6 +12,15 @@ import type { SlackContext } from "./utils/slack-context.js";
 
 export type PrefixMode = "qa" | "coding" | "planning" | "minimal-coding" | "minimal-planning";
 
+/** Set when the question comes from a Linear issue instead of Slack. */
+export interface LinearSurface {
+  kind: "linear";
+  issueIdentifier?: string;
+  issueTitle?: string;
+  issueUrl?: string;
+  userEmail?: string;
+}
+
 export interface RepoInfo {
   name: string;
   dir: string;
@@ -31,6 +40,8 @@ export interface PrefixOpts {
   tools?: string[];
   /** Q&A mode: resolved repo info for multi-repo. */
   repo?: RepoInfo;
+  /** Q&A mode: omitted for Slack. */
+  surface?: LinearSurface;
 }
 
 // ── Follow-up reminders (isNew === false) ──
@@ -68,15 +79,20 @@ function buildQAInstructions(opts: PrefixOpts): string[] {
     ? `You are a Q&A assistant for the ${repoName} codebase, with additional capabilities via your tools.`
     : `You are a READ-ONLY Q&A assistant for the ${repoName} codebase.`;
 
+  const onLinear = opts.surface?.kind === "linear";
   const lines = [
     identity,
-    "Your answers appear as Slack messages. Follow these rules strictly:",
+    onLinear
+      ? "Your answers are posted as comments on a Linear issue, rendered as Markdown. Follow these rules strictly:"
+      : "Your answers appear as Slack messages. Follow these rules strictly:",
     "",
     "1. Lead with the direct answer to the question in 1-2 sentences, then provide supporting detail.",
     "2. EXPLAIN the current state of the codebase: how things work, where code lives, how features are structured, what APIs exist, how data flows.",
     "3. CITE specific file paths (e.g. `indigo/models/account.py:42`).",
     "4. Use code SNIPPETS from the repo when they help explain — but only existing code, never new code.",
-    "5. Tables render as native Slack tables only when standalone: blank line before and after, never inside a list item or code fence.",
+    onLinear
+      ? "5. Standard Markdown (headings, lists, tables, code blocks) renders normally in Linear."
+      : "5. Tables render as native Slack tables only when standalone: blank line before and after, never inside a list item or code fence.",
     "6. If you need clarification, ask a short clarifying question.",
     "",
     "NEVER DO ANY OF THE FOLLOWING:",
@@ -110,6 +126,14 @@ function buildQAInstructions(opts: PrefixOpts): string[] {
     "(e.g. product managers, designers, support), favor high-level explanations. " +
     "For engineering roles, include file paths, code references, and technical detail.",
   );
+
+  if (onLinear) {
+    lines.push(
+      "",
+      "You were @mentioned in, or delegated, a Linear issue; the issue and its thread are in the user's question.",
+      "Scheduling isn't available from Linear (it has to be set up in Slack), and memories must use `global` or `repo` scope, not `channel`.",
+    );
+  }
 
   if (opts.repo) {
     lines.push(
@@ -253,6 +277,13 @@ function appendContextBlock(lines: string[], ctx: SlackContext): void {
   if (ctx.customPrompt) lines.push(`Custom instructions for this channel: ${ctx.customPrompt}`);
 }
 
+function appendLinearContextBlock(lines: string[], ctx: SlackContext, surface: LinearSurface): void {
+  const email = surface.userEmail ? ` <${surface.userEmail}>` : "";
+  lines.push(`User: ${ctx.userName}${email} (asking from Linear)`);
+  const issue = [surface.issueIdentifier, surface.issueTitle].filter(Boolean).join(": ");
+  if (issue) lines.push(`Linear issue: ${issue}${surface.issueUrl ? ` (${surface.issueUrl})` : ""}`);
+}
+
 function appendThreadContext(lines: string[], ctx: SlackContext): void {
   if (ctx.threadContext) {
     lines.push(
@@ -362,7 +393,11 @@ export function buildPrefix(opts: PrefixOpts): string {
 
   // Context block
   lines.push("<context>");
-  appendContextBlock(lines, ctx);
+  if (opts.surface?.kind === "linear") {
+    appendLinearContextBlock(lines, ctx, opts.surface);
+  } else {
+    appendContextBlock(lines, ctx);
+  }
   appendThreadContext(lines, ctx);
   appendLinkedThreadContext(lines, ctx);
   lines.push("</context>", "");

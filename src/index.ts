@@ -26,6 +26,8 @@ import { completeOAuthExchange } from "./handlers/tool-commands.js";
 import {
   openConfigureModal, retryConfigureModal, saveConfigureSubmission, TOOL_CONFIGURE_MODAL_CALLBACK,
 } from "./handlers/tool-configure.js";
+import { readLinearConfig } from "./linear/config.js";
+import { startLinearSurface, type LinearSurfaceHandle } from "./linear/index.js";
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN;
@@ -412,8 +414,17 @@ async function runContextGeneration(): Promise<void> {
   }
 }
 
+let linearSurface: LinearSurfaceHandle | null = null;
+
 // Start the app
 async function start(): Promise<void> {
+  // 0. Linear webhook listener (optional). Started first so load balancer
+  //    health checks pass while OpenCode boots; events wait until it's ready.
+  const linearConfig = readLinearConfig();
+  if (linearConfig) {
+    linearSurface = await startLinearSurface(linearConfig);
+  }
+
   // 1a. Seed tools from tools.json on first boot (getDb() is called lazily inside)
   seedToolsFromFile(TOOLS_SEED_PATH);
 
@@ -451,6 +462,9 @@ async function start(): Promise<void> {
   // 6. Clean up any orphaned coding sessions from a prior crash
   cleanupOrphanedSessions();
 
+  // 6b. OpenCode and repos are up: let queued Linear events through
+  linearSurface?.markReady();
+
   // 7. Start Slack bot
   await app.start();
   console.log(`Slack bot is running (OpenCode server: ${OPENCODE_URL})`);
@@ -479,6 +493,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   shuttingDown = true;
   console.log(`[shutdown] start (signal=${signal})`);
+  try { await linearSurface?.close(); } catch (e) { console.warn("[shutdown] linearSurface.close:", e); }
   try { stopScheduler(); } catch (e) { console.warn("[shutdown] stopScheduler:", e); }
   try { stopPeriodicTokenRefresh(); } catch (e) { console.warn("[shutdown] stopPeriodicTokenRefresh:", e); }
   try { stopPeriodicGDocsSync(); } catch (e) { console.warn("[shutdown] stopPeriodicGDocsSync:", e); }

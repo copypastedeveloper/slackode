@@ -364,6 +364,14 @@ Query from Slack with `stats`:
 
 Stats are read-only and open to all users. Threads are the headline metric (count of distinct conversations); turns inside threads are shown as a secondary number.
 
+### Linear agent (optional)
+
+People can also @mention Slackode in a Linear issue comment, or delegate an issue to it, and get the answer in the issue thread. It uses Linear's [agent platform](https://linear.app/developers/agents). Replies continue the conversation and **Stop** cancels a run. It runs the same read-only Q&A as Slack, without the scheduler tools.
+
+Linear only delivers events by webhook, so enabling it opens `LINEAR_WEBHOOK_PORT` (default `8080`). Expose only `POST /webhooks/linear`, over HTTPS; `GET /health` is for a load balancer.
+
+To set it up, a Linear workspace admin creates an app under **Settings → API → Applications**. Turn on **Client credentials**, and turn on webhooks to `https://<your-host>/webhooks/linear` with **Agent session events**. Then set `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` and `LINEAR_WEBHOOK_SECRET` (all three, or it stays off), plus optionally `LINEAR_AGENT_TOOLS` (e.g. `linear,sentry`).
+
 ## Architecture
 
 ```

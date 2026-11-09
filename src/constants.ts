@@ -82,7 +82,7 @@ export const BOT_MANAGED_PATHS = [".opencode", ".claude", ".agents", "opencode.j
 
 export const INTERNAL_AGENT_NAMES = new Set([
   "plan", "general", "explore", "code", "build", "context",
-  "summarizer", "compaction", "title", "summary", "enrich",
+  "summarizer", "compaction", "title", "summary", "enrich", "linear",
 ]);
 
 export const INTERNAL_AGENT_PREFIX = "build-";

@@ -3,6 +3,7 @@ import path from "node:path";
 import { getEnabledTools, getToolKey, getOAuthAccessToken, parseAllowedTools } from "./sessions.js";
 import { ensureFreshToken } from "./mcp/oauth-refresh.js";
 import { setActiveTools } from "./active-tools.js";
+import { readLinearConfig, LINEAR_AGENT_NAME } from "./linear/config.js";
 
 /** Path to the pristine base config (without MCP injections). */
 const BASE_CONFIG_PATH = process.env.BASE_CONFIG_PATH ?? "/app/opencode.json";
@@ -240,6 +241,20 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
         tools: { ...enrichAgent.tools, ...allToolOverrides },
       };
     }
+  }
+
+  // Linear agent: the Q&A build agent plus LINEAR_AGENT_TOOLS, without the
+  // scheduler tools (they need Slack channel/user IDs).
+  const linearConfig = readLinearConfig();
+  if (linearConfig && config.agent.build) {
+    const buildAgent = config.agent.build;
+    const toolOverrides: Record<string, boolean> = {};
+    for (const t of linearConfig.tools.filter((name) => enabled.includes(name))) addToolEnables(toolOverrides, t);
+    config.agent[LINEAR_AGENT_NAME] = {
+      description: `${buildAgent.description} (Linear)`,
+      tools: { ...buildAgent.tools, ...toolOverrides, "scheduler*": false },
+      permission: { ...buildAgent.permission, external_directory: { "/app/repos/*": "allow" } },
+    };
   }
 
   // In code mode, switch to the write-enabled "code" agent and enable write tools
