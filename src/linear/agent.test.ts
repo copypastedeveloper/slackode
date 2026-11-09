@@ -61,6 +61,7 @@ function harness(overrides: Partial<LinearAgentDeps> = {}) {
     turnCapMs: 60_000,
     progressIntervalMs: 0,
     activityRetryDelaysMs: [],
+    identityRetryDelaysMs: [0, 0],
     ...overrides,
   };
 
@@ -339,6 +340,54 @@ test("Stop mid-answer on a new session still sends full instructions next time",
   await h.agent.handle(promptedEvent("after stop"));
   await h.agent.idle();
   assert.equal(h.asks[1].isNewSession, true);
+});
+
+test("a turn that throws before answering still owes the full instructions", async () => {
+  for (const startCompacted of [false, true]) {
+    const h = harness();
+    if (startCompacted) {
+      await h.deps.sessions.getOrCreate("linear:session-1");
+      h.compacted.add("linear:session-1");
+    }
+    let calls = 0;
+    h.setAsk(async () => {
+      calls++;
+      if (calls === 1) throw new Error("connect ECONNREFUSED");
+      return ANSWER;
+    });
+    await h.agent.handle(createdEvent());
+    await h.agent.idle();
+    assert.equal(durable(h.posted).at(-1)?.type, "error");
+    await h.agent.handle(promptedEvent("retry"));
+    await h.agent.idle();
+    assert.deepEqual(h.asks.map((a) => a.isNewSession), [true, true], `compacted=${startCompacted}`);
+  }
+});
+
+test("a transient identity failure doesn't drop the event", async () => {
+  let attempts = 0;
+  const h = harness({
+    getIdentity: async () => {
+      attempts++;
+      if (attempts === 1) throw new Error("Linear token request failed: HTTP 503");
+      return { appUserId: "app-user", organizationId: "org-narmi", organizationName: "Narmi" };
+    },
+  });
+  await h.agent.handle(createdEvent());
+  await h.agent.idle();
+  assert.equal(attempts, 2);
+  assert.equal(h.asks.length, 1);
+  assert.equal(durable(h.posted).at(-1)?.type, "response");
+});
+
+test("a persistent identity failure gives up without throwing", async () => {
+  const h = harness({
+    getIdentity: async () => { throw new Error("Linear token request failed: HTTP 401"); },
+  });
+  await h.agent.handle(createdEvent());
+  await h.agent.idle();
+  assert.equal(h.asks.length, 0);
+  assert.equal(h.posted.length, 0);
 });
 
 test("a redelivered event is handled once", async () => {

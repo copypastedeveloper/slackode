@@ -78,6 +78,7 @@ export interface LinearAgentDeps {
   turnCapMs: number;
   progressIntervalMs?: number;
   activityRetryDelaysMs?: number[];
+  identityRetryDelaysMs?: number[];
 }
 
 interface Turn {
@@ -147,7 +148,7 @@ export class LinearAgent {
     const agentSessionId = p.agentSession?.id;
     if (!agentSessionId) return;
 
-    const identity = await this.deps.getIdentity();
+    const identity = await this.identityWithRetry();
     if (p.organizationId !== identity.organizationId) {
       console.warn(`[linear] Ignoring event for organization ${p.organizationId ?? "(none)"}`);
       return;
@@ -192,6 +193,27 @@ export class LinearAgent {
 
     s.queue.push({ question, generation: s.generation, ctx: { ...s.ctx } });
     void this.pump(s);
+  }
+
+  /**
+   * The webhook has already been acknowledged, so a brief Linear API blip
+   * while fetching the app's identity mustn't drop the event. Retry before
+   * giving up.
+   */
+  private async identityWithRetry(): Promise<LinearIdentity> {
+    const delays = this.deps.identityRetryDelaysMs ?? [1_000, 3_000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.deps.getIdentity();
+      } catch (err) {
+        if (attempt >= delays.length) throw err;
+        console.warn(
+          `[linear] Fetching the app identity failed (attempt ${attempt + 1}), retrying:`,
+          err instanceof Error ? err.message : err,
+        );
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+      }
+    }
   }
 
   private isDuplicate(p: AgentSessionEventPayload, agentSessionId: string): boolean {
@@ -324,7 +346,7 @@ export class LinearAgent {
       },
     };
 
-    let result: AskResult;
+    let result: AskResult | undefined;
     try {
       try {
         result = await this.deps.ask(askOpts);
@@ -343,8 +365,10 @@ export class LinearAgent {
       }
     } finally {
       progress.stop();
+      // The turn didn't complete (it threw, or was stopped), so the full
+      // instructions may never have reached the session.
+      if (!result || run.stopRequested) keepFullContextPending();
       if (run.stopRequested) {
-        keepFullContextPending();
         // Stop's abort may have landed before this prompt reached the server
         // (e.g. while the stream was still opening). Abort once more now that
         // the turn has settled, before the next turn can use the session.
@@ -353,6 +377,7 @@ export class LinearAgent {
       }
       if (s.current === run) s.current = undefined;
     }
+    if (!result) return;
 
     if (result.deadSession) {
       // The session never started the turn; retire the mapping so the next message gets a fresh one.
