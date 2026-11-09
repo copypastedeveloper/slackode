@@ -12,6 +12,21 @@ import type { SlackContext } from "./utils/slack-context.js";
 
 export type PrefixMode = "qa" | "coding" | "planning" | "minimal-coding" | "minimal-planning";
 
+/**
+ * Set when the conversation comes from Linear instead of Slack. Changes the
+ * formatting rules (Linear markdown, not Slack) and the context block (the
+ * issue, not a Slack channel).
+ */
+export interface LinearSurface {
+  kind: "linear";
+  issueIdentifier?: string;
+  issueTitle?: string;
+  issueUrl?: string;
+  userEmail?: string;
+  /** Agent guidance configured by the Linear workspace's admins. */
+  guidance?: string;
+}
+
 export interface RepoInfo {
   name: string;
   dir: string;
@@ -31,6 +46,8 @@ export interface PrefixOpts {
   tools?: string[];
   /** Q&A mode: resolved repo info for multi-repo. */
   repo?: RepoInfo;
+  /** Q&A mode: where the conversation happens. Omitted = Slack. */
+  surface?: LinearSurface;
 }
 
 // ── Follow-up reminders (isNew === false) ──
@@ -68,15 +85,20 @@ function buildQAInstructions(opts: PrefixOpts): string[] {
     ? `You are a Q&A assistant for the ${repoName} codebase, with additional capabilities via your tools.`
     : `You are a READ-ONLY Q&A assistant for the ${repoName} codebase.`;
 
+  const onLinear = opts.surface?.kind === "linear";
   const lines = [
     identity,
-    "Your answers appear as Slack messages. Follow these rules strictly:",
+    onLinear
+      ? "Your answers are posted as comments on a Linear issue, rendered as Markdown. Follow these rules strictly:"
+      : "Your answers appear as Slack messages. Follow these rules strictly:",
     "",
     "1. Lead with the direct answer to the question in 1-2 sentences, then provide supporting detail.",
     "2. EXPLAIN the current state of the codebase: how things work, where code lives, how features are structured, what APIs exist, how data flows.",
     "3. CITE specific file paths (e.g. `indigo/models/account.py:42`).",
     "4. Use code SNIPPETS from the repo when they help explain — but only existing code, never new code.",
-    "5. Tables render as native Slack tables only when standalone: blank line before and after, never inside a list item or code fence.",
+    onLinear
+      ? "5. Standard Markdown (headings, lists, tables, code blocks) renders normally in Linear."
+      : "5. Tables render as native Slack tables only when standalone: blank line before and after, never inside a list item or code fence.",
     "6. If you need clarification, ask a short clarifying question.",
     "",
     "NEVER DO ANY OF THE FOLLOWING:",
@@ -110,6 +132,16 @@ function buildQAInstructions(opts: PrefixOpts): string[] {
     "(e.g. product managers, designers, support), favor high-level explanations. " +
     "For engineering roles, include file paths, code references, and technical detail.",
   );
+
+  if (onLinear) {
+    lines.push(
+      "",
+      "LINEAR:",
+      "You were @mentioned in, or delegated, a Linear issue. The issue and its comment thread are in the user's question.",
+      "- Scheduling tools are not available here. If asked to schedule or watch something, say that has to be set up from Slack.",
+      "- There is no Slack channel in this conversation: save memories with `global` or `repo` scope, never `channel`.",
+    );
+  }
 
   if (opts.repo) {
     lines.push(
@@ -253,6 +285,21 @@ function appendContextBlock(lines: string[], ctx: SlackContext): void {
   if (ctx.customPrompt) lines.push(`Custom instructions for this channel: ${ctx.customPrompt}`);
 }
 
+function appendLinearContextBlock(lines: string[], ctx: SlackContext, surface: LinearSurface): void {
+  const email = surface.userEmail ? ` <${surface.userEmail}>` : "";
+  lines.push(`User: ${ctx.userName}${email} (asking from Linear)`);
+  if (surface.issueIdentifier || surface.issueTitle) {
+    const label = [surface.issueIdentifier, surface.issueTitle].filter(Boolean).join(": ");
+    lines.push(`Linear issue: ${label}${surface.issueUrl ? ` (${surface.issueUrl})` : ""}`);
+  }
+  if (surface.guidance) {
+    lines.push(
+      "Agent guidance from the Linear workspace's admins:",
+      "<linear_guidance>", surface.guidance, "</linear_guidance>",
+    );
+  }
+}
+
 function appendThreadContext(lines: string[], ctx: SlackContext): void {
   if (ctx.threadContext) {
     lines.push(
@@ -362,7 +409,11 @@ export function buildPrefix(opts: PrefixOpts): string {
 
   // Context block
   lines.push("<context>");
-  appendContextBlock(lines, ctx);
+  if (opts.surface?.kind === "linear") {
+    appendLinearContextBlock(lines, ctx, opts.surface);
+  } else {
+    appendContextBlock(lines, ctx);
+  }
   appendThreadContext(lines, ctx);
   appendLinkedThreadContext(lines, ctx);
   lines.push("</context>", "");
