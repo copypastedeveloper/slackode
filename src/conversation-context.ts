@@ -7,6 +7,8 @@ export interface SurfaceTraits {
   messageNoun: string;
   /** Slotted into the prompt's numbered answer rules. */
   formattingRules: string[];
+  /** Extra Q&A instructions, e.g. features this surface doesn't support. */
+  notes?: string[];
 }
 
 export interface ConversationContext {
@@ -15,6 +17,7 @@ export interface ConversationContext {
     /** Real surface ID, not a display name: tools take it as an argument. */
     id: string;
     name: string;
+    email?: string;
     title?: string;
     status?: string;
   };
@@ -25,6 +28,7 @@ export interface ConversationContext {
     name: string;
     /** Shown after the ID, e.g. "dm" / "channel". */
     kind?: string;
+    url?: string;
     topic?: string;
     purpose?: string;
   };
