@@ -16,18 +16,19 @@ const req = (extra: Partial<TurnRequest> = {}): TurnRequest => ({ question: "q",
 
 class FakeSurface implements Surface {
   readonly kind = "fake";
-  readonly threadKey = "t1";
   readonly scopeId = "scope1";
-  readonly runKey = "run1";
   events: string[] = [];
-  replies: { markdown: string; sessionId: string; capped: boolean }[] = [];
+  replies: { markdown: string; sessionId: string; capped: boolean; failed: boolean }[] = [];
+
+  constructor(readonly threadKey = "t1", readonly runKey = "run1") {}
 
   async restarting() { this.events.push("restarting"); }
+  async queued() { this.events.push("queued"); }
   progress(status: string) { this.events.push(`progress:${status}`); }
   begin() { this.events.push("begin"); }
   async end() { this.events.push("end"); }
   async stopped() { this.events.push("stopped"); }
-  async reply(markdown: string, meta: { sessionId: string; capped: boolean }) {
+  async reply(markdown: string, meta: { sessionId: string; capped: boolean; failed: boolean }) {
     this.events.push("reply");
     this.replies.push({ markdown, ...meta });
   }
@@ -39,13 +40,16 @@ function setup(overrides: {
   compacted?: boolean;
   restarting?: () => boolean;
   scope?: ScopeConfig;
+  getOrCreate?: TurnRunnerDeps["sessions"]["getOrCreate"];
 } = {}) {
   const runs = new Map<string, ActiveRun>();
   const compacted = new Map<string, boolean>([["t1", overrides.compacted ?? false]]);
   const removed: string[] = [];
   const asks: AskQuestionOpts[] = [];
   let restarts = 0;
+  const serverAborts: string[] = [];
   const deps: TurnRunnerDeps = {
+    abortServerSide: async (id) => { serverAborts.push(id); },
     ask: async (opts) => {
       asks.push(opts);
       return overrides.ask ? overrides.ask(opts) : { text: "answer", isQuestion: false, compacted: false };
@@ -53,7 +57,7 @@ function setup(overrides: {
     isRestarting: overrides.restarting ?? (() => false),
     waitForRestart: async () => { restarts++; },
     sessions: {
-      getOrCreate: async () => ({ sessionId: "s1", isNew: overrides.isNew ?? false }),
+      getOrCreate: overrides.getOrCreate ?? (async () => ({ sessionId: "s1", isNew: overrides.isNew ?? false })),
       remove: (k) => { removed.push(k); },
       isCompacted: (k) => compacted.get(k) ?? false,
       setCompacted: (k, v) => { compacted.set(k, v); },
@@ -66,7 +70,13 @@ function setup(overrides: {
     resolveScope: () => overrides.scope ?? {},
     turnCapMs: 60_000,
   };
-  return { deps, runs, compacted, removed, asks, restarts: () => restarts, runTurn: createTurnRunner(deps) };
+  return { deps, runs, compacted, removed, asks, serverAborts, restarts: () => restarts, ...createTurnRunner(deps) };
+}
+
+/** Simulates a Stop that lands between registering the run and asking. */
+function stopOnRegister(deps: TurnRunnerDeps) {
+  const register = deps.runs.register;
+  deps.runs.register = (key, run) => { run.stopRequested = true; register(key, run); };
 }
 
 describe("runTurn", () => {
@@ -76,7 +86,7 @@ describe("runTurn", () => {
     const outcome = await t.runTurn(s, req({ question: "why?" }));
     assert.equal(outcome, "answered");
     assert.deepEqual(s.events, ["begin", "end", "reply"]);
-    assert.deepEqual(s.replies, [{ markdown: "answer", sessionId: "s1", capped: false }]);
+    assert.deepEqual(s.replies, [{ markdown: "answer", sessionId: "s1", capped: false, failed: false }]);
     assert.equal(t.runs.size, 0);
     assert.equal(t.asks[0].question, "why?");
     assert.equal(t.asks[0].sessionId, "s1");
@@ -134,11 +144,11 @@ describe("runTurn", () => {
     assert.equal(s.replies[0].capped, true);
   });
 
-  it("reports a user stop instead of an answer", async () => {
+  it("reports a user stop instead of an answer, and aborts again once settled", async () => {
     const s = new FakeSurface();
     const t = setup({
       ask: async (opts) => {
-        // Simulates the Stop button: flag the registered run, then abort.
+        // Simulates the Stop button.
         const run = t.runs.get("run1")!;
         run.stopRequested = true;
         run.controller.abort();
@@ -147,8 +157,46 @@ describe("runTurn", () => {
       },
     });
     assert.equal(await t.runTurn(s, req()), "stopped");
-    assert.deepEqual(s.events, ["begin", "stopped", "end"]);
+    assert.deepEqual(s.events, ["begin", "end", "stopped"]);
+    assert.deepEqual(t.serverAborts, ["s1"]);
     assert.equal(t.runs.size, 0);
+  });
+
+  it("drops an answer that arrives after Stop", async () => {
+    const s = new FakeSurface();
+    const t = setup({
+      ask: async () => {
+        t.runs.get("run1")!.stopRequested = true;
+        return { text: "late", isQuestion: false, compacted: false };
+      },
+    });
+    assert.equal(await t.runTurn(s, req()), "stopped");
+    assert.equal(s.replies.length, 0);
+  });
+
+  it("doesn't ask when the run is stopped before it starts", async () => {
+    const t = setup();
+    stopOnRegister(t.deps);
+    assert.equal(await t.runTurn(new FakeSurface(), req()), "stopped");
+    assert.equal(t.asks.length, 0);
+  });
+
+  it("keeps the full instructions owed after a failed or stopped first turn", async () => {
+    const failed = setup({ isNew: true, ask: async () => { throw new Error("ECONNREFUSED"); } });
+    await assert.rejects(failed.runTurn(new FakeSurface(), req()));
+    assert.equal(failed.compacted.get("t1"), true);
+
+    const stopped = setup({ isNew: true });
+    stopOnRegister(stopped.deps);
+    await stopped.runTurn(new FakeSurface(), req());
+    assert.equal(stopped.compacted.get("t1"), true);
+  });
+
+  it("flags failed answers", async () => {
+    const t = setup({ ask: async () => ({ text: "sorry", isQuestion: false, compacted: false, failed: true }) });
+    const s = new FakeSurface();
+    await t.runTurn(s, req());
+    assert.equal(s.replies[0].failed, true);
   });
 
   it("rethrows an abort that wasn't a user stop", async () => {
@@ -205,5 +253,105 @@ describe("runTurn", () => {
     const t = setup();
     await t.runTurn(new FakeSurface(), req());
     assert.deepEqual(t.asks[0].analytics, { userId: "U1", channelId: "scope1", channelName: "lobby", threadKey: "t1" });
+  });
+
+  it("waits out a restart before starting when asked to", async () => {
+    let restarting = true;
+    const t = setup({ restarting: () => restarting });
+    t.deps.waitForRestart = async () => { restarting = false; };
+    const s = new FakeSurface();
+    assert.equal(await t.runTurn(s, req({ waitForRestart: true })), "answered");
+    assert.ok(!s.events.includes("restarting"));
+  });
+});
+
+/** An ask that stays pending until the test settles it. */
+function pendingAsks() {
+  const waiting: { question: string; answer: (text: string) => void; fail: (err: Error) => void }[] = [];
+  const ask = (opts: AskQuestionOpts) => new Promise<AskResult>((resolve, reject) => {
+    waiting.push({
+      question: opts.question,
+      answer: (text) => resolve({ text, isQuestion: false, compacted: false }),
+      fail: reject,
+    });
+    opts.abortSignal?.addEventListener("abort", () => reject(new Error("Session aborted")));
+  });
+  return { waiting, ask };
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+describe("runTurn threads", () => {
+  it("runs turns in the same thread one at a time", async () => {
+    const p = pendingAsks();
+    const t = setup({ ask: p.ask });
+    const b = new FakeSurface("t1", "b");
+    const first = t.runTurn(new FakeSurface("t1", "a"), req({ question: "one" }));
+    const second = t.runTurn(b, req({ question: "two" }));
+    await tick();
+    assert.deepEqual(p.waiting.map((w) => w.question), ["one"]);
+    assert.deepEqual(b.events, ["queued"]);
+
+    p.waiting[0].answer("first");
+    assert.equal(await first, "answered");
+    await tick();
+    assert.deepEqual(p.waiting.map((w) => w.question), ["one", "two"]);
+    p.waiting[1].answer("second");
+    assert.equal(await second, "answered");
+    assert.equal(b.replies[0].markdown, "second");
+  });
+
+  it("runs different threads concurrently", async () => {
+    const p = pendingAsks();
+    const t = setup({ ask: p.ask });
+    const one = t.runTurn(new FakeSurface("t1", "a"), req());
+    const two = t.runTurn(new FakeSurface("t2", "b"), req());
+    await tick();
+    assert.equal(p.waiting.length, 2);
+    p.waiting.forEach((w) => w.answer("x"));
+    await Promise.all([one, two]);
+  });
+
+  it("moves on after a turn throws", async () => {
+    const p = pendingAsks();
+    const t = setup({ ask: p.ask });
+    const first = t.runTurn(new FakeSurface("t1", "a"), req());
+    const second = t.runTurn(new FakeSurface("t1", "b"), req());
+    await tick();
+    p.waiting[0].fail(new Error("boom"));
+    await assert.rejects(first, /boom/);
+    await tick();
+    p.waiting[1].answer("ok");
+    assert.equal(await second, "answered");
+  });
+
+  it("stopThread stops the running turn and drops the queued ones", async () => {
+    const p = pendingAsks();
+    const t = setup({ ask: p.ask });
+    const b = new FakeSurface("t1", "b");
+    const first = t.runTurn(new FakeSurface("t1", "a"), req());
+    const second = t.runTurn(b, req());
+    await tick();
+    assert.equal(t.stopThread("t1"), true);
+    assert.equal(await first, "stopped");
+    assert.equal(await second, "stopped");
+    assert.equal(p.waiting.length, 1);
+    assert.deepEqual(b.events, ["queued", "stopped"]);
+    assert.ok(t.serverAborts.length > 0);
+
+    assert.equal(t.stopThread("t1"), false);
+  });
+
+  it("stopThread during session lookup prevents the ask", async () => {
+    let resolveSession!: () => void;
+    const t = setup({
+      getOrCreate: () => new Promise((r) => { resolveSession = () => r({ sessionId: "s1", isNew: false }); }),
+    });
+    const turn = t.runTurn(new FakeSurface(), req());
+    await tick();
+    assert.equal(t.stopThread("t1"), true);
+    resolveSession();
+    assert.equal(await turn, "stopped");
+    assert.equal(t.asks.length, 0);
   });
 });

@@ -6,35 +6,14 @@
 import type { WebClient } from "@slack/web-api";
 import type { KnownBlock } from "@slack/types";
 import type { OpencodeClient } from "@opencode-ai/sdk";
-import { Action, TURN_HARD_CAP_MS, TURN_SLOW_CHECK_MS } from "../constants.js";
-import { askQuestion, askForShorterResponse } from "../opencode.js";
-import { isRestarting, waitForRestart } from "../opencode-server.js";
-import { registerRun, getRun, removeRun } from "../run-registry.js";
-import {
-  getOrCreateSession, deleteSessionMapping, isSessionCompacted, setSessionCompacted,
-} from "../sessions.js";
+import { Action, TURN_SLOW_CHECK_MS } from "../constants.js";
+import { askForShorterResponse } from "../opencode.js";
+import { getRun } from "../run-registry.js";
 import { listJobs, getJobById, reassignJobOwner } from "../db/jobs.js";
 import { runJob } from "../job-runner.js";
 import { createProgressUpdater } from "../utils/progress.js";
 import { formatResponse } from "../utils/formatting.js";
-import { createTurnRunner } from "../turn-runner.js";
-import { resolveScopeConfig } from "../scope-config.js";
 import type { Surface } from "./types.js";
-
-export const runTurn = createTurnRunner({
-  ask: askQuestion,
-  isRestarting,
-  waitForRestart,
-  sessions: {
-    getOrCreate: getOrCreateSession,
-    remove: deleteSessionMapping,
-    isCompacted: isSessionCompacted,
-    setCompacted: setSessionCompacted,
-  },
-  runs: { register: registerRun, get: getRun, remove: removeRun },
-  resolveScope: resolveScopeConfig,
-  turnCapMs: TURN_HARD_CAP_MS,
-});
 
 export interface SlackSurfaceOpts {
   client: WebClient;
@@ -67,6 +46,10 @@ export class SlackSurface implements Surface {
 
   async restarting(): Promise<void> {
     await this.updatePlaceholder("_I'm reconfiguring right now. Please try again in a few seconds._");
+  }
+
+  async queued(): Promise<void> {
+    await this.updatePlaceholder("_I'll get to this once I've finished the answer above..._");
   }
 
   progress(status: string): void {

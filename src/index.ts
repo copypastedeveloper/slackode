@@ -1,7 +1,7 @@
 import bolt from "@slack/bolt";
 const { App } = bolt;
 import { initOpencode, abortSessionServerSide } from "./opencode.js";
-import { getRun } from "./run-registry.js";
+import { getRun, stopRun } from "./run-registry.js";
 import { closeDb, seedToolsFromFile, bootstrapAdmins, hasRole } from "./sessions.js";
 import { writeOpencodeConfig } from "./opencode-config.js";
 import { setRepoDir, startServer, stopServer, restartServer } from "./opencode-server.js";
@@ -119,16 +119,14 @@ app.action(Action.RUN_STOP, async ({ action, ack, body, client }) => {
   const runKey = (action as { value: string }).value;
   const channel = (body as { channel?: { id: string } }).channel?.id;
   const messageTs = (body as { message?: { ts: string } }).message?.ts;
-  const run = getRun(runKey);
+  const run = stopRun(runKey, (sessionId) => abortSessionServerSide(sessionId));
   if (!run) {
     if (channel && messageTs) {
       await client.chat.update({ channel, ts: messageTs, text: "_That run already finished._", blocks: [] }).catch(() => {});
     }
     return;
   }
-  run.stopRequested = true;
-  run.controller.abort();
-  await abortSessionServerSide(run.sessionId);
+  await run.serverAbort;
   if (channel && messageTs) {
     await client.chat.update({ channel, ts: messageTs, text: "_Stopping..._", blocks: [] }).catch(() => {});
   }
