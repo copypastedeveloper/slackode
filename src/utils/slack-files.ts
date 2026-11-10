@@ -14,12 +14,7 @@ export interface SlackFile {
   filetype: string;
 }
 
-export interface ConvertedFile {
-  mime: string;
-  filename: string;
-  dataUri: string;
-  sizeBytes: number;
-}
+import type { ConvertedFile } from "../attachments.js";
 
 /** Default MIME types accepted for model-facing file attachments. */
 export const MODEL_MIMES = new Set([

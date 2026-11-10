@@ -1,5 +1,6 @@
 import type { WebClient } from "@slack/web-api";
 import type { SlackFile } from "./slack-files.js";
+import type { ConversationContext, SurfaceTraits } from "../conversation-context.js";
 
 export interface SlackContext {
   userId: string;
@@ -17,6 +18,39 @@ export interface SlackContext {
   customPrompt?: string;
   threadContext?: string;
   linkedThreadContext?: string;
+}
+
+export const SLACK_SURFACE: SurfaceTraits = {
+  name: "Slack",
+  messageNoun: "Slack messages",
+  formattingRules: [
+    "Tables render as native Slack tables only when standalone: blank line before and after, never inside a list item or code fence.",
+  ],
+};
+
+/** Map Slack's user/channel/thread details into the surface-neutral prompt context. */
+export function toConversationContext(ctx: SlackContext): ConversationContext {
+  return {
+    surface: SLACK_SURFACE,
+    requester: {
+      id: ctx.userId,
+      name: ctx.userName,
+      title: ctx.userTitle,
+      status: ctx.userStatusText,
+    },
+    place: {
+      label: "Channel",
+      id: ctx.channelId,
+      name: ctx.channelName,
+      kind: ctx.channelType,
+      topic: ctx.channelTopic,
+      purpose: ctx.channelPurpose,
+    },
+    threadId: ctx.threadTs,
+    customPrompt: ctx.customPrompt,
+    priorConversation: ctx.threadContext,
+    linkedConversation: ctx.linkedThreadContext,
+  };
 }
 
 export async function getSlackContext(

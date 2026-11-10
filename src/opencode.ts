@@ -4,8 +4,8 @@ import {
 } from "@opencode-ai/sdk";
 import { buildPrefix } from "./context-prefix.js";
 import type { RepoInfo } from "./context-prefix.js";
-import type { SlackContext } from "./utils/slack-context.js";
-import type { ConvertedFile } from "./utils/slack-files.js";
+import type { ConversationContext } from "./conversation-context.js";
+import type { ConvertedFile } from "./attachments.js";
 import { REQUEST_TIMEOUT_MS } from "./constants.js";
 import { openStream, streamAnswer } from "./opencode-stream.js";
 import { recordTurn, type TurnOutcome } from "./db/turns.js";
@@ -106,7 +106,7 @@ export async function sessionExists(sessionId: string): Promise<boolean> {
 // ── Context prefix thin wrappers ──
 
 export function buildContextPrefix(
-  ctx: SlackContext,
+  ctx: ConversationContext,
   isNew: boolean,
   tools?: string[],
   repo?: RepoInfo,
@@ -115,7 +115,7 @@ export function buildContextPrefix(
 }
 
 export function buildCodingContextPrefix(
-  ctx: SlackContext,
+  ctx: ConversationContext,
   isNew: boolean,
   repoName: string,
   repoDir: string,
@@ -124,7 +124,7 @@ export function buildCodingContextPrefix(
 }
 
 export function buildPlanningContextPrefix(
-  ctx: SlackContext,
+  ctx: ConversationContext,
   isNew: boolean,
   repoName: string,
   repoDir: string,
@@ -230,7 +230,7 @@ export interface AskResult {
 export interface AskQuestionOpts {
   sessionId: string;
   question: string;
-  ctx?: SlackContext;
+  ctx?: ConversationContext;
   onProgress?: ProgressCallback;
   isNewSession?: boolean;
   agent?: string;

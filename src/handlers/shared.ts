@@ -1,27 +1,11 @@
 import type { WebClient } from "@slack/web-api";
-import type { KnownBlock } from "@slack/types";
-import type { OpencodeClient } from "@opencode-ai/sdk";
-import {
-  getOrCreateSession,
-  getChannelConfig,
-  getChannelAgent, getChannelTools, resolveAgent,
-  isSessionCompacted, setSessionCompacted,
-  deleteSessionMapping,
-  hasRole,
-} from "../sessions.js";
-import { registerRun, getRun, removeRun } from "../run-registry.js";
-import { Action, TURN_HARD_CAP_MS, TURN_SLOW_CHECK_MS } from "../constants.js";
-import { listJobs, getJobById, reassignJobOwner } from "../db/jobs.js";
-import { runJob } from "../job-runner.js";
-import { askQuestion, askForShorterResponse } from "../opencode.js";
-import type { RepoInfo } from "../context-prefix.js";
-import { isRestarting, waitForRestart } from "../opencode-server.js";
-import { resolveRepoForChannel } from "../repo-manager.js";
+import { hasRole } from "../sessions.js";
+import { isRestarting } from "../opencode-server.js";
 import { getActiveCodingSession } from "../coding-session.js";
-import { formatResponse } from "../utils/formatting.js";
-import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
-import { downloadFiles, TEXT_MIMES, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
-import { createProgressUpdater } from "../utils/progress.js";
+import { getSlackContext, fetchThreadContext, fetchLinkedThreads, toConversationContext, type SlackContext } from "../utils/slack-context.js";
+import { downloadFiles, TEXT_MIMES, type SlackFile } from "../utils/slack-files.js";
+import type { ConvertedFile } from "../attachments.js";
+import { SlackSurface, runTurn } from "../surfaces/slack.js";
 import { handleConfigCommand } from "./config-commands.js";
 import { handleToolCommand, advanceToolAdd } from "./tool-commands.js";
 import { handleRepoCommand } from "./repo-commands.js";
@@ -331,11 +315,6 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
       ? "What is in this file?"
       : "Can you help with this?");
 
-    const channelAgent = getChannelAgent(channelId);
-    const channelTools = getChannelTools(channelId);
-    const agent = resolveAgent(channelAgent, channelTools);
-    const repo = resolveRepoForChannel(channelId);
-
     await handleQuestion({
       client,
       channel: channelId,
@@ -343,11 +322,8 @@ export async function processIncoming(opts: IncomingOpts): Promise<void> {
       placeholderTs,
       question: finalQuestion,
       slackCtx,
-      agent,
-      tools: channelTools,
       threadContext,
       files,
-      repo,
     });
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
@@ -374,327 +350,35 @@ export interface HandleQuestionOpts {
   placeholderTs: string;
   question: string;
   slackCtx: SlackContext;
-  /** Agent name resolved from channel config + tools. */
-  agent?: string;
-  /** Channel tools (e.g. ["linear", "sentry"]). */
-  tools?: string[];
   /** Pre-fetched thread context for mid-thread @mentions. */
   threadContext?: string;
   /** File attachments (images/PDFs) converted to data URIs. */
   files?: ConvertedFile[];
-  /** Resolved repo info for multi-repo support. */
-  repo?: RepoInfo;
 }
 
-/**
- * Shared Q&A pipeline used by both the mention and DM handlers.
- * Handles: session management, progress updates, askQuestion, formatting,
- * and posting the response back to Slack.
- */
+/** Slack Q&A turn for mentions and DMs: builds the prompt context and hands off to the turn runner. */
 export async function handleQuestion(opts: HandleQuestionOpts): Promise<void> {
-  const { client, channel, threadTs, placeholderTs, question, slackCtx, agent, tools, threadContext, files, repo } = opts;
+  const { client, channel, threadTs, placeholderTs, question, slackCtx, threadContext, files } = opts;
+  const surface = new SlackSurface({ client, channel, threadTs, placeholderTs, userId: slackCtx.userId });
 
-  // If the OpenCode server is restarting, return a friendly message
+  // Skip the Slack lookups below when the turn can't start anyway.
   if (isRestarting()) {
-    await client.chat.update({
-      channel,
-      ts: placeholderTs,
-      text: "_I'm reconfiguring right now. Please try again in a few seconds._",
-    });
+    await surface.restarting();
     return;
   }
 
-  // Surface the thread so scheduler tools can tag jobs with their origin thread.
-  slackCtx.threadTs = threadTs;
-
-  // Attach per-channel custom prompt if configured
-  const channelConfig = getChannelConfig(channel);
-  if (channelConfig) {
-    slackCtx.customPrompt = channelConfig.customPrompt;
-  }
-
-  if (threadContext) {
-    slackCtx.threadContext = threadContext;
-  }
-
   // Resolve any Slack thread links in the question text
+  let linkedThreadContext: string | undefined;
   try {
-    const linked = await fetchLinkedThreads(client, question);
-    if (linked) {
-      slackCtx.linkedThreadContext = linked;
-    }
+    linkedThreadContext = await fetchLinkedThreads(client, question) || undefined;
   } catch (err) {
     console.warn("[linked-threads] Failed to fetch linked threads:", err);
   }
 
-  const { sessionId, isNew } = await getOrCreateSession(threadTs, channel);
-
-  // If a previous response triggered compaction, re-send full instructions
-  // so the agent recovers its behavioral constraints, then clear the flag.
-  const needsFullContext = isNew || isSessionCompacted(threadTs);
-  if (!isNew && needsFullContext) {
-    setSessionCompacted(threadTs, false);
-  }
-
-  // Set up throttled progress updates
-  const progress = createProgressUpdater(client, channel, placeholderTs);
-
-  // Long-run controls: a mutable deadline the "keep waiting" button can extend,
-  // an abort controller the Stop button fires, and a slow-check message with
-  // both buttons posted once the turn passes TURN_SLOW_CHECK_MS.
-  const controller = new AbortController();
-  const budget = { deadlineAt: Date.now() + TURN_HARD_CAP_MS };
-  const runKey = `${channel}:${placeholderTs}`;
-  registerRun(runKey, { sessionId, controller, budget, stopRequested: false, extensions: 0 });
-
-  let slowCheckTs: string | undefined;
-  const slowCheckTimer = setTimeout(() => {
-    void (async () => {
-      try {
-        const posted = await client.chat.postMessage({
-          channel,
-          thread_ts: threadTs,
-          text: "Still working on this — it's a big one. Keep going?",
-          blocks: [
-            { type: "section", text: { type: "mrkdwn", text: ":hourglass_flowing_sand: _Still working on this — it's a big one. Keep going?_" } },
-            {
-              type: "actions",
-              elements: [
-                { type: "button", text: { type: "plain_text", text: "Keep going" }, style: "primary", action_id: Action.RUN_KEEP_WAITING, value: runKey },
-                { type: "button", text: { type: "plain_text", text: "Stop" }, action_id: Action.RUN_STOP, value: runKey },
-              ],
-            },
-          ],
-        });
-        slowCheckTs = posted.ts;
-        const run = getRun(runKey);
-        if (!run) {
-          // Turn finished while we were posting — clean up immediately.
-          if (posted.ts) await client.chat.delete({ channel, ts: posted.ts }).catch(() => {});
-        }
-      } catch (err) {
-        console.warn("[run-control] Failed to post slow-check message:", err);
-      }
-    })();
-  }, TURN_SLOW_CHECK_MS);
-
-  const askOpts = {
-    sessionId,
+  await runTurn(surface, {
     question,
-    ctx: slackCtx,
-    onProgress: (status: string) => { progress.update(status); },
-    isNewSession: needsFullContext,
-    agent,
-    tools,
+    // threadTs is surfaced so scheduler tools can tag jobs with their origin thread.
+    context: toConversationContext({ ...slackCtx, threadTs, threadContext, linkedThreadContext }),
     files,
-    repo,
-    abortSignal: controller.signal,
-    budget,
-    salvageOnTimeout: true,
-    analytics: {
-      userId: slackCtx.userId,
-      channelId: channel,
-      channelName: slackCtx.channelName,
-      threadKey: threadTs,
-    },
-  };
-
-  // Snapshot existing jobs so we can detect any the agent creates during this
-  // session and correct their (model-supplied) owner to the real requester.
-  const jobIdsBefore = new Set(listJobs().map((j) => j.id));
-
-  let result;
-  try {
-    try {
-      result = await askQuestion(askOpts);
-    } catch (err) {
-      // User pressed Stop: the abort already reached the server; just confirm.
-      if (getRun(runKey)?.stopRequested && err instanceof Error && err.message === "Session aborted") {
-        progress.stop();
-        await client.chat.update({
-          channel,
-          ts: placeholderTs,
-          text: "_Stopped at your request._",
-        });
-        return;
-      }
-      // If the server is restarting (tool config change killed it mid-flight),
-      // wait for the restart to finish and retry once.
-      if (isRestarting()) {
-        progress.update("_Reconfiguring... I'll pick back up in a moment._");
-        await waitForRestart();
-        budget.deadlineAt = Date.now() + TURN_HARD_CAP_MS;
-        result = await askQuestion(askOpts);
-      } else {
-        throw err;
-      }
-    }
-  } finally {
-    clearTimeout(slowCheckTimer);
-    removeRun(runKey);
-    if (slowCheckTs) {
-      await client.chat.delete({ channel, ts: slowCheckTs }).catch(() => {});
-    }
-  }
-
-  // Wedged session (never started the turn): retire the thread mapping so the
-  // next question gets a fresh session instead of piling up behind the zombie.
-  if (result.deadSession) {
-    deleteSessionMapping(threadTs);
-    console.warn(`[run-control] Retired wedged session mapping for thread ${threadTs} (session ${sessionId})`);
-  }
-
-  // If compaction occurred during this response, flag the session so the
-  // next message re-sends the full behavioral instructions.
-  if (result.compacted) {
-    setSessionCompacted(threadTs, true);
-  }
-
-  progress.stop();
-
-  const rawMarkdown = result.capped
-    ? `:warning: _I hit my time limit before finishing the research, so this is my best answer from what I gathered — it may be incomplete._\n\n${result.text}`
-    : result.text;
-
-  await safePostResponse({
-    client, channel, threadTs, placeholderTs,
-    rawMarkdown,
-    sessionId,
   });
-
-  // If the agent scheduled a job this session, its owner (created_by) was
-  // model-supplied and may be wrong. Correct it to the real requester and fire
-  // the deferred review run so the confirmation DM reaches the right person.
-  await reconcilePendingJobOwnership(jobIdsBefore, slackCtx.userId, threadTs, client);
-}
-
-/**
- * Jobs created conversationally record a model-supplied owner (see the
- * scheduler MCP) and are flagged owner_pending with their first run deferred.
- * After the session, reassign any such new job to the authoritative requesting
- * user and fire its review run — the review posts only to the owner's DM
- * (probation), so this both fixes ownership and routes the confirmation DM
- * to the person who actually asked.
- *
- * Attribution: a new owner_pending job is claimed by this session when its
- * recorded thread_ts matches this thread (the reliable case — there is exactly
- * one Thread ID in context, so the model can't confuse it the way it confuses
- * user IDs). Jobs stamped with a *different* thread belong to a concurrent
- * session and are left alone. A job with no thread falls back to the
- * "created during this session's window" heuristic.
- */
-async function reconcilePendingJobOwnership(
-  before: Set<string>,
-  userId: string | undefined,
-  threadTs: string,
-  client: WebClient,
-): Promise<void> {
-  if (!userId) return;
-  let pending;
-  try {
-    pending = listJobs().filter((j) => {
-      if (!j.owner_pending) return false;
-      // Thread-tagged jobs: claim only our own thread's, ignore other threads'.
-      if (j.thread_ts) return j.thread_ts === threadTs;
-      // Untagged (model omitted Thread ID): fall back to the session window.
-      return !before.has(j.id);
-    });
-  } catch (err) {
-    console.error("[jobs] ownership reconcile: listJobs failed:", err);
-    return;
-  }
-  for (const job of pending) {
-    try {
-      if (job.created_by !== userId) {
-        console.log(`[jobs] correcting owner of ${job.name}: ${job.created_by} -> ${userId}`);
-      }
-      reassignJobOwner(job.id, userId);
-      const fresh = getJobById(job.id);
-      if (fresh) {
-        // Fire-and-forget: the review run spawns its own session and DMs the owner.
-        runJob(fresh, client).catch((err) =>
-          console.error(`[jobs] deferred review run for ${fresh.name} failed:`, err),
-        );
-      }
-    } catch (err) {
-      console.error(`[jobs] ownership reconcile failed for ${job.name}:`, err);
-    }
-  }
-}
-
-// ── Safe Slack posting (catches msg_too_long and falls back) ──
-
-export interface SafePostOpts {
-  client: WebClient;
-  channel: string;
-  threadTs: string;
-  placeholderTs: string;
-  rawMarkdown: string;
-  /** Session ID to retry with the same agent if msg_too_long. */
-  sessionId?: string;
-  /** Custom OpenCode client (for coding sessions). */
-  customClient?: OpencodeClient;
-  /** Custom base URL (for coding sessions). */
-  customBaseUrl?: string;
-  /** Append action buttons to the last message. */
-  actionButtons?: KnownBlock;
-}
-
-export async function safePostResponse(opts: SafePostOpts): Promise<void> {
-  const { client, channel, threadTs, placeholderTs, rawMarkdown, sessionId, customClient, customBaseUrl, actionButtons } = opts;
-
-  const tryPost = async (markdown: string) => {
-    const messages = formatResponse(markdown);
-    if (actionButtons) {
-      const last = messages[messages.length - 1];
-      if (last.blocks.length >= 50) {
-        // Last message is full — append buttons as a separate message
-        messages.push({ text: "", blocks: [actionButtons] });
-      } else {
-        last.blocks.push(actionButtons);
-      }
-    }
-    const first = messages[0];
-    await client.chat.update({
-      channel,
-      ts: placeholderTs,
-      text: first.text,
-      ...(first.blocks && { blocks: first.blocks }),
-    });
-    for (let i = 1; i < messages.length; i++) {
-      const msg = messages[i];
-      await client.chat.postMessage({
-        channel,
-        thread_ts: threadTs,
-        text: msg.text,
-        ...(msg.blocks && { blocks: msg.blocks }),
-      });
-    }
-  };
-
-  try {
-    await tryPost(rawMarkdown);
-  } catch (err) {
-    const isSlackError = err instanceof Error && err.message.includes("msg_too_long");
-    if (!isSlackError) throw err;
-
-    console.warn("[slack] msg_too_long — asking agent to shorten");
-    await client.chat.update({
-      channel,
-      ts: placeholderTs,
-      text: "_Response was too long — asking for a shorter version..._",
-    });
-
-    if (sessionId) {
-      const shorter = await askForShorterResponse({ sessionId, customClient, customBaseUrl });
-      await tryPost(shorter);
-    } else {
-      // No session to retry with — hard fallback
-      await client.chat.update({
-        channel,
-        ts: placeholderTs,
-        text: "(Response too long for Slack. Please try asking a more specific question.)",
-      });
-    }
-  }
 }

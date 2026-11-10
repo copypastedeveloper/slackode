@@ -10,10 +10,11 @@ import {
   getActiveCodingSession, createCodingSession, askCodingQuestion,
   listCodingAgents,
 } from "../coding-session.js";
-import { getSlackContext, fetchThreadContext, fetchLinkedThreads, type SlackContext } from "../utils/slack-context.js";
-import { downloadFiles, type SlackFile, type ConvertedFile } from "../utils/slack-files.js";
+import { getSlackContext, fetchThreadContext, fetchLinkedThreads, toConversationContext, type SlackContext } from "../utils/slack-context.js";
+import { downloadFiles, type SlackFile } from "../utils/slack-files.js";
+import type { ConvertedFile } from "../attachments.js";
 import { createProgressUpdater } from "../utils/progress.js";
-import { safePostResponse } from "./shared.js";
+import { safePostResponse } from "../surfaces/slack.js";
 import { Action, BlockPrefix, MAX_AGENT_BUTTONS, MAX_REPO_BUTTONS, HOSTNAME } from "../constants.js";
 import { getEnabledRepos, getUserGithubToken } from "../sessions.js";
 import { resolveRepoForChannel } from "../repo-manager.js";
@@ -243,7 +244,7 @@ export async function handleCodingMessage(opts: CodingMessageOpts): Promise<void
     const result = await askCodingQuestion({
       session,
       question,
-      ctx: slackCtx,
+      ctx: toConversationContext(slackCtx),
       onProgress: (status: string) => { progress.update(status); },
       files,
     });
@@ -440,7 +441,7 @@ export async function handleApprove(
     const result = await askCodingQuestion({
       session: { ...session, status: SessionStatus.ACTIVE },
       question: "The user has approved your plan. Now execute it — write all the code changes you described.",
-      ctx: slackCtx,
+      ctx: toConversationContext(slackCtx),
       onProgress: (status: string) => { progress.update(status); },
     });
 
