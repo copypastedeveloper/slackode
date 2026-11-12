@@ -8,7 +8,7 @@
 import { getToolInstructions } from "./tools.js";
 import { readRepoContextFiles, readRepoOverview } from "./context-gen.js";
 import { getGlobalKnowledge } from "./knowledge.js";
-import type { SlackContext } from "./utils/slack-context.js";
+import type { ConversationContext } from "./conversation-context.js";
 
 export type PrefixMode = "qa" | "coding" | "planning" | "minimal-coding" | "minimal-planning";
 
@@ -20,7 +20,7 @@ export interface RepoInfo {
 }
 
 export interface PrefixOpts {
-  ctx: SlackContext;
+  ctx: ConversationContext;
   isNew: boolean;
   mode: PrefixMode;
   /** Required for coding/planning modes. */
@@ -70,14 +70,16 @@ function buildQAInstructions(opts: PrefixOpts): string[] {
 
   const lines = [
     identity,
-    "Your answers appear as Slack messages. Follow these rules strictly:",
+    `Your answers appear as ${opts.ctx.surface.messageNoun}. Follow these rules strictly:`,
     "",
-    "1. Lead with the direct answer to the question in 1-2 sentences, then provide supporting detail.",
-    "2. EXPLAIN the current state of the codebase: how things work, where code lives, how features are structured, what APIs exist, how data flows.",
-    "3. CITE specific file paths (e.g. `indigo/models/account.py:42`).",
-    "4. Use code SNIPPETS from the repo when they help explain — but only existing code, never new code.",
-    "5. Tables render as native Slack tables only when standalone: blank line before and after, never inside a list item or code fence.",
-    "6. If you need clarification, ask a short clarifying question.",
+    ...[
+      "Lead with the direct answer to the question in 1-2 sentences, then provide supporting detail.",
+      "EXPLAIN the current state of the codebase: how things work, where code lives, how features are structured, what APIs exist, how data flows.",
+      "CITE specific file paths (e.g. `indigo/models/account.py:42`).",
+      "Use code SNIPPETS from the repo when they help explain — but only existing code, never new code.",
+      ...opts.ctx.surface.formattingRules,
+      "If you need clarification, ask a short clarifying question.",
+    ].map((rule, i) => `${i + 1}. ${rule}`),
     "",
     "NEVER DO ANY OF THE FOLLOWING:",
     "- Do NOT suggest code changes, write diffs, or show what code \"should\" look like",
@@ -205,7 +207,7 @@ function buildPlanningInstructions(opts: PrefixOpts): string[] {
 
 function buildMinimalCodingInstructions(opts: PrefixOpts): string[] {
   return [
-    `This is a Slack-driven coding session on the ${opts.repoName} repository.`,
+    `This is a ${opts.ctx.surface.name}-driven coding session on the ${opts.repoName} repository.`,
     "",
     "You MUST write code. Do NOT stop at analysis, investigation, or listing files. " +
     "Do NOT describe what changes are needed — MAKE the changes using write/edit tools. " +
@@ -219,7 +221,7 @@ function buildMinimalCodingInstructions(opts: PrefixOpts): string[] {
 
 function buildMinimalPlanningInstructions(opts: PrefixOpts): string[] {
   return [
-    `This is a Slack-driven coding session on the ${opts.repoName} repository (planning phase).`,
+    `This is a ${opts.ctx.surface.name}-driven coding session on the ${opts.repoName} repository (planning phase).`,
     "",
     "You are in PLANNING mode. Read the code, investigate the codebase, and produce a detailed implementation PLAN. " +
     "Do NOT use write, edit, or patch tools. Do NOT modify any files.",
@@ -240,33 +242,36 @@ const INSTRUCTION_BUILDERS: Record<PrefixMode, (opts: PrefixOpts) => string[]> =
 
 // ── Shared context/thread/linked-thread assembly ──
 
-function appendContextBlock(lines: string[], ctx: SlackContext): void {
-  // IDs are included so tools that take user/channel arguments (e.g. the
-  // scheduler tools) can be called with the real Slack IDs, not display names.
-  lines.push(`User: ${ctx.userName} (user ID: ${ctx.userId})`);
-  if (ctx.threadTs) lines.push(`Thread ID: ${ctx.threadTs}`);
-  if (ctx.userTitle) lines.push(`Role/Title: ${ctx.userTitle}`);
-  if (ctx.userStatusText) lines.push(`Status: ${ctx.userStatusText}`);
-  lines.push(`Channel: ${ctx.channelName} (channel ID: ${ctx.channelId}, ${ctx.channelType})`);
-  if (ctx.channelTopic) lines.push(`Channel topic: ${ctx.channelTopic}`);
-  if (ctx.channelPurpose) lines.push(`Channel purpose: ${ctx.channelPurpose}`);
-  if (ctx.customPrompt) lines.push(`Custom instructions for this channel: ${ctx.customPrompt}`);
+function appendContextBlock(lines: string[], ctx: ConversationContext): void {
+  // IDs are included so tools that take user/place arguments (e.g. the
+  // scheduler tools) can be called with the real IDs, not display names.
+  const { requester, place } = ctx;
+  const label = place.label;
+  const lower = label.toLowerCase();
+  lines.push(`User: ${requester.name} (user ID: ${requester.id})`);
+  if (ctx.threadId) lines.push(`Thread ID: ${ctx.threadId}`);
+  if (requester.title) lines.push(`Role/Title: ${requester.title}`);
+  if (requester.status) lines.push(`Status: ${requester.status}`);
+  lines.push(`${label}: ${place.name} (${lower} ID: ${place.id}${place.kind ? `, ${place.kind}` : ""})`);
+  if (place.topic) lines.push(`${label} topic: ${place.topic}`);
+  if (place.purpose) lines.push(`${label} purpose: ${place.purpose}`);
+  if (ctx.customPrompt) lines.push(`Custom instructions for this ${lower}: ${ctx.customPrompt}`);
 }
 
-function appendThreadContext(lines: string[], ctx: SlackContext): void {
-  if (ctx.threadContext) {
+function appendThreadContext(lines: string[], ctx: ConversationContext): void {
+  if (ctx.priorConversation) {
     lines.push(
       "", "Preceding conversation in this thread:",
-      "<thread_context>", ctx.threadContext, "</thread_context>",
+      "<thread_context>", ctx.priorConversation, "</thread_context>",
     );
   }
 }
 
-function appendLinkedThreadContext(lines: string[], ctx: SlackContext): void {
-  if (ctx.linkedThreadContext) {
+function appendLinkedThreadContext(lines: string[], ctx: ConversationContext): void {
+  if (ctx.linkedConversation) {
     lines.push(
-      "", "The user's message includes a link to another Slack thread:",
-      "<linked_thread_context>", ctx.linkedThreadContext, "</linked_thread_context>",
+      "", `The user's message includes a link to another ${ctx.surface.name} thread:`,
+      "<linked_thread_context>", ctx.linkedConversation, "</linked_thread_context>",
     );
   }
 }
@@ -299,15 +304,15 @@ export function buildPrefix(opts: PrefixOpts): string {
 
   // ── Follow-up (short reminder) ──
   if (!isNew) {
-    const roleLine = ctx.userTitle ? ` (${ctx.userTitle})` : "";
+    const roleLine = ctx.requester.title ? ` (${ctx.requester.title})` : "";
     const reminder = FOLLOW_UP_REMINDERS[mode](opts);
     const parts = [
       "<instructions>",
       `${reminder} ${SHORT_SECURITY_LINE}`,
       "</instructions>",
-      `[${ctx.userName}${roleLine} in ${ctx.channelName}]`,
+      `[${ctx.requester.name}${roleLine} in ${ctx.place.name}]`,
     ];
-    if (ctx.customPrompt) parts.push(`Channel instructions: ${ctx.customPrompt}`);
+    if (ctx.customPrompt) parts.push(`${ctx.place.label} instructions: ${ctx.customPrompt}`);
     appendLinkedThreadContext(parts, ctx);
     parts.push("");
     return parts.join("\n");

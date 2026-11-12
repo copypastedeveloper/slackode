@@ -25,8 +25,8 @@ import {
   type AskResult, type ProgressCallback,
 } from "./opencode.js";
 import { buildPrefix } from "./context-prefix.js";
-import type { SlackContext } from "./utils/slack-context.js";
-import type { ConvertedFile } from "./utils/slack-files.js";
+import type { ConversationContext } from "./conversation-context.js";
+import type { ConvertedFile } from "./attachments.js";
 
 const MAX_CODING_SESSIONS = parseInt(process.env.MAX_CODING_SESSIONS ?? "10", 10);
 const IDLE_TIMEOUT_SECONDS = 30 * 60; // 30 minutes
@@ -275,7 +275,7 @@ export async function createCodingSession(
 export async function askCodingQuestion(opts: {
   session: CodingSession;
   question: string;
-  ctx: SlackContext;
+  ctx: ConversationContext;
   onProgress?: ProgressCallback;
   files?: ConvertedFile[];
 }): Promise<AskResult> {
