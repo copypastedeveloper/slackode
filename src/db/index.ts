@@ -92,6 +92,14 @@ export function getDb(): Database.Database {
         updated_at INTEGER NOT NULL DEFAULT (unixepoch())
       )
     `);
+    // Default tools per surface (Slack, Linear, ...) for scopes without their own channel_tools row.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS surface_tools (
+        surface_id TEXT PRIMARY KEY,
+        tools TEXT NOT NULL,
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )
+    `);
     db.exec(`
       CREATE TABLE IF NOT EXISTS channel_config (
         channel_id TEXT PRIMARY KEY,

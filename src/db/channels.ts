@@ -1,5 +1,6 @@
 import { getDb } from "./index.js";
 import { getActiveTools } from "../active-tools.js";
+import { NO_SCHEDULER_AGENT } from "../constants.js";
 
 /**
  * Drop channel tools that didn't make it into the generated config (removed,
@@ -85,17 +86,49 @@ export function listChannelTools(): ChannelToolsRow[] {
     .all() as ChannelToolsRow[];
 }
 
+// --- Default tools per surface ---
+
+/** Tools for a surface's scopes that have none of their own. An empty list means none. */
+export function getSurfaceTools(surfaceId: string): string[] | undefined {
+  const row = getDb()
+    .prepare("SELECT tools FROM surface_tools WHERE surface_id = ?")
+    .get(surfaceId) as { tools: string } | undefined;
+  return row ? row.tools.split(",").filter(Boolean) : undefined;
+}
+
+export function setSurfaceTools(surfaceId: string, tools: string[]): void {
+  getDb()
+    .prepare("INSERT OR REPLACE INTO surface_tools (surface_id, tools, updated_at) VALUES (?, ?, unixepoch())")
+    .run(surfaceId, tools.join(","));
+}
+
+export function clearSurfaceTools(surfaceId: string): boolean {
+  return getDb().prepare("DELETE FROM surface_tools WHERE surface_id = ?").run(surfaceId).changes > 0;
+}
+
+export function listSurfaceTools(): { surface_id: string; tools: string }[] {
+  return getDb()
+    .prepare("SELECT surface_id, tools FROM surface_tools ORDER BY surface_id")
+    .all() as { surface_id: string; tools: string }[];
+}
+
+/** A scope's own tools replace its surface's defaults; an empty list means none. */
+export function getEffectiveTools(surfaceId: string, scopeId: string): string[] | undefined {
+  return getChannelTools(scopeId) ?? getSurfaceTools(surfaceId);
+}
+
 /**
  * Resolve the OpenCode agent name based on channel agent and tools.
  * If a custom agent is set, it takes priority (tools are ignored).
- * Otherwise, tools map to predefined agent variants (e.g. build-linear, build-sentry).
+ * Otherwise, tools map to predefined agent variants (e.g. build-linear, build-sentry),
+ * or the build-noscheduler family when the surface can't schedule.
  */
-export function resolveAgent(channelAgent?: string, channelTools?: string[]): string | undefined {
+export function resolveAgent(channelAgent?: string, channelTools?: string[], scheduling = true): string | undefined {
   if (channelAgent) return channelAgent;
-  if (!channelTools || channelTools.length === 0) return undefined;
-  const sorted = filterToActive(channelTools).sort();
-  if (sorted.length === 0) return undefined;
-  return `build-${sorted.join("-")}`;
+  const base = scheduling ? "build" : NO_SCHEDULER_AGENT;
+  const sorted = filterToActive(channelTools ?? []).sort();
+  if (sorted.length === 0) return scheduling ? undefined : base;
+  return `${base}-${sorted.join("-")}`;
 }
 
 /**
