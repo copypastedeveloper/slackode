@@ -23,7 +23,7 @@ export interface TurnRunnerDeps {
     get: (key: string) => ActiveRun | undefined;
     remove: (key: string) => void;
   };
-  resolveScope: (scopeId: string) => ScopeConfig;
+  resolveScope: (surfaceId: string, scopeId: string) => ScopeConfig;
   turnCapMs: number;
 }
 
@@ -122,7 +122,7 @@ export function createTurnRunner(deps: TurnRunnerDeps) {
     if (generation !== t.generation) stop(run);
     surface.begin?.();
 
-    const scope = deps.resolveScope(surface.scopeId);
+    const scope = deps.resolveScope(surface.kind, surface.scopeId);
     const context: ConversationContext = {
       ...request.context,
       customPrompt: request.context.customPrompt ?? scope.customPrompt,

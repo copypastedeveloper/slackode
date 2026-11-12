@@ -3,6 +3,8 @@ import path from "node:path";
 import { getEnabledTools, getToolKey, getOAuthAccessToken, parseAllowedTools } from "./sessions.js";
 import { ensureFreshToken } from "./mcp/oauth-refresh.js";
 import { setActiveTools } from "./active-tools.js";
+import { listSurfaces } from "./surfaces/registry.js";
+import { NO_SCHEDULER_AGENT } from "./constants.js";
 
 /** Path to the pristine base config (without MCP injections). */
 const BASE_CONFIG_PATH = process.env.BASE_CONFIG_PATH ?? "/app/opencode.json";
@@ -186,28 +188,39 @@ export async function writeOpencodeConfig(repoDir: string, mode: ConfigMode = "q
     }
   };
 
+  // Q&A agent variant with a subset of the MCP tools, optionally without the scheduler.
+  const buildAgent = config.agent.build;
+  const addQaVariant = (name: string, subset: string[], scheduling: boolean): void => {
+    const toolOverrides: Record<string, boolean> = {};
+    for (const t of subset) addToolEnables(toolOverrides, t);
+    if (!scheduling) toolOverrides["scheduler*"] = false;
+    const traits = [subset.length > 0 && `with ${subset.join(", ")} tools`, !scheduling && "without scheduling"];
+    config.agent[name] = {
+      description: [buildAgent.description, ...traits.filter(Boolean)].join(" "),
+      tools: { ...buildAgent.tools, ...toolOverrides },
+      permission: {
+        ...buildAgent.permission,
+        external_directory: {
+          "/app/repos/*": "allow",
+        },
+      },
+    };
+  };
+  // Only generated when a registered surface (src/surfaces/registry.ts) can't schedule.
+  const noScheduler = Boolean(buildAgent) && listSurfaces().some((s) => !s.scheduling);
+  if (noScheduler) addQaVariant(NO_SCHEDULER_AGENT, [], false);
+
   if (enabled.length === 0) {
     console.log("[config] No tool API keys configured.");
   } else {
     // Generate agent variants for every non-empty subset of enabled tools.
     // E.g. [linear, sentry] -> build-linear, build-sentry, build-linear-sentry
-    const buildAgent = config.agent.build;
+    // (and build-noscheduler-linear, ... when needed).
     const count = enabled.length;
     for (let mask = 1; mask < (1 << count); mask++) {
       const subset = enabled.filter((_, i) => mask & (1 << i)).sort();
-      const agentName = `build-${subset.join("-")}`;
-      const toolOverrides: Record<string, boolean> = {};
-      for (const t of subset) addToolEnables(toolOverrides, t);
-      config.agent[agentName] = {
-        description: `${buildAgent.description} with ${subset.join(", ")} tools`,
-        tools: { ...buildAgent.tools, ...toolOverrides },
-        permission: {
-          ...buildAgent.permission,
-          external_directory: {
-            "/app/repos/*": "allow",
-          },
-        },
-      };
+      addQaVariant(`build-${subset.join("-")}`, subset, true);
+      if (noScheduler) addQaVariant(`${NO_SCHEDULER_AGENT}-${subset.join("-")}`, subset, false);
     }
     console.log(`[config] Generated agent variants for: ${enabled.join(", ")}`);
 

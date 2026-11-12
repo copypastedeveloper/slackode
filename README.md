@@ -263,6 +263,14 @@ All channel configuration is done via `@bot config <command>`. Settings persist 
 @Slackode config available tools
 ```
 
+**Default tools per surface** — used wherever no tools are set: Slack channels, DMs and scheduled jobs use the `slack` defaults, and other surfaces (like Linear) use their own. A channel's own tools replace the defaults, and `none` turns them off for a channel. Admins set them:
+```
+@Slackode config set tools linear,sentry --surface slack
+@Slackode config get tools --surface slack
+@Slackode config clear tools --surface slack
+@Slackode config set tools none
+```
+
 **Repo assignment:**
 ```
 @Slackode config set repo frontend

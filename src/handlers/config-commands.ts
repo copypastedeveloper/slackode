@@ -4,9 +4,11 @@ import {
   getChannelTools, setChannelTools, clearChannelTools, listChannelTools,
   getChannelConfig, setChannelConfig, clearChannelConfig, listChannelConfigs,
   getChannelRepo, setChannelRepo, clearChannelRepo, listChannelRepos,
-  getRepo, getDefaultRepo, getAllRepos,
+  getRepo, getDefaultRepo, getAllRepos, hasRole,
+  getSurfaceTools, setSurfaceTools, clearSurfaceTools, listSurfaceTools,
 } from "../sessions.js";
 import { getKnownTools, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
+import { getSurface, listSurfaces, type SurfaceInfo } from "../surfaces/registry.js";
 
 /**
  * Handle config commands like:
@@ -25,7 +27,8 @@ import { getKnownTools, MAX_CUSTOM_PROMPT_LENGTH } from "../tools.js";
  *
  * Any command may carry `--channel <#chan>` to target a channel other than the
  * one the message was sent in (the bot need not be a member — channel config
- * is DB-only).
+ * is DB-only). Tool commands also take `--surface <id>` to manage a surface's
+ * default tools, used wherever no tools are set (admin-only to change).
  *
  * Returns the reply text if it was a config command, or null if not.
  * Shared between mention and DM handlers.
@@ -49,6 +52,30 @@ export async function handleConfigCommand(
     channelName = channelFlag[2] || (await resolveChannelName(client, channelId)) || channelId;
     subcommand = subcommand.replace(channelFlag[0], " ").trim();
   }
+
+  // `--surface <id>`: a surface's default tools instead of this channel's tools.
+  let surface: SurfaceInfo | undefined;
+  const surfaceFlag = subcommand.match(/\s*--surface\s+(\S+)\s*/i);
+  if (surfaceFlag) {
+    surface = getSurface(surfaceFlag[1].toLowerCase());
+    if (!surface) {
+      return `Unknown surface \`${surfaceFlag[1]}\`. Surfaces: ${listSurfaces().map((s) => `\`${s.id}\``).join(", ")}`;
+    }
+    subcommand = subcommand.replace(surfaceFlag[0], " ").trim();
+    if (!/^(set|get|clear)\s+tools?\b/i.test(subcommand)) {
+      return "`--surface` only applies to tools: `config set|get|clear tools --surface <id>`.";
+    }
+    if (!/^get\b/i.test(subcommand) && !hasRole(userId, "admin")) {
+      return "Changing a surface's default tools requires *admin* permissions.";
+    }
+  }
+  const surfaceLabel = surface && `${surface.name} default tools`;
+  const toolList = (tools: string[]): string => tools.map((t) => `\`${t}\``).join(", ");
+  // Config commands run in Slack, so a channel falls back to Slack's defaults.
+  const slackDefaults = (): string => {
+    const tools = getSurfaceTools("slack");
+    return tools?.length ? toolList(tools) : "";
+  };
 
   // config set agent <name>
   const setMatch = subcommand.match(/^set\s+agent\s+(\S+)$/i);
@@ -92,6 +119,11 @@ export async function handleConfigCommand(
   const setToolsMatch = subcommand.match(/^set\s+tools?\s+(.+)$/i);
   if (setToolsMatch) {
     const requested = setToolsMatch[1].split(/[\s,]+/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+    if (requested.length === 1 && requested[0] === "none") {
+      if (surface) setSurfaceTools(surface.id, []);
+      else setChannelTools(channelId, channelName, []);
+      return surface ? `${surfaceLabel} set to none.` : "Tools turned off here, including Slack's default tools.";
+    }
     const knownTools = getKnownTools();
     const invalid = requested.filter((t) => !(t in knownTools));
     if (invalid.length > 0) {
@@ -103,36 +135,53 @@ export async function handleConfigCommand(
       const available = Object.keys(knownTools).map((k) => `\`${k}\``).join(", ");
       return `No valid tools specified. Please provide at least one tool name. Available tools: ${available}`;
     }
+    if (surface) {
+      setSurfaceTools(surface.id, unique);
+      return `${surfaceLabel} set to ${toolList(unique)}. They apply wherever ${surface.name} has no tools of its own set.`;
+    }
     setChannelTools(channelId, channelName, unique);
     return `Tools set to ${unique.map((t) => `\`${t}\``).join(", ")}. Messages here can now reference ${unique.join(" and ")} data.`;
   }
 
   // config get tools
   if (/^get\s+tools?$/i.test(subcommand)) {
+    if (surface) {
+      const tools = getSurfaceTools(surface.id);
+      if (!tools) return `No ${surfaceLabel} configured.`;
+      return `${surfaceLabel}: ${tools.length ? toolList(tools) : "none"}`;
+    }
     const tools = getChannelTools(channelId);
     if (tools && tools.length > 0) {
-      return `Tools enabled: ${tools.map((t) => `\`${t}\``).join(", ")}`;
+      return `Tools enabled: ${toolList(tools)}`;
     }
+    if (tools) return "Tools turned off here, including Slack's default tools.";
+    const defaults = slackDefaults();
+    if (defaults) return `No tools set here, so Slack's default tools apply: ${defaults}`;
     return `No extra tools configured — using codebase Q&A only.`;
   }
 
   // config clear tools
   if (/^clear\s+tools?$/i.test(subcommand)) {
-    const removed = clearChannelTools(channelId);
-    if (removed) {
-      return `Tools cleared. Using codebase Q&A only.`;
+    if (surface) {
+      return clearSurfaceTools(surface.id) ? `${surfaceLabel} cleared.` : `No ${surfaceLabel} were configured.`;
     }
-    return `No tools were configured.`;
+    if (!clearChannelTools(channelId)) return `No tools were configured.`;
+    const defaults = slackDefaults();
+    return defaults ? `Tools cleared. Slack's default tools apply: ${defaults}` : `Tools cleared. Using codebase Q&A only.`;
   }
 
   // config list tools
   if (/^list\s+tools?$/i.test(subcommand)) {
-    const rows = listChannelTools();
-    if (rows.length === 0) {
+    const show = (tools: string): string => (tools ? toolList(tools.split(",")) : "none");
+    const defaults = listSurfaceTools().map((r) => `• ${getSurface(r.surface_id)?.name ?? r.surface_id} → ${show(r.tools)}`);
+    const rows = listChannelTools().map((r) => `• #${r.channel_name} → ${show(r.tools)}`);
+    if (defaults.length === 0 && rows.length === 0) {
       return "No channel-specific tools configured.";
     }
-    const lines = rows.map((r) => `• #${r.channel_name} → ${r.tools.split(",").map((t: string) => `\`${t}\``).join(", ")}`);
-    return `*Channel tool mappings:*\n${lines.join("\n")}`;
+    return [
+      ...(defaults.length ? [`*Default tools by surface:*\n${defaults.join("\n")}`] : []),
+      ...(rows.length ? [`*Channel tool mappings:*\n${rows.join("\n")}`] : []),
+    ].join("\n\n");
   }
 
   // config available tools
@@ -275,7 +324,7 @@ export async function handleConfigCommand(
     "• `config get agent`",
     "• `config clear agent`",
     "• `config list agents`",
-    "• `config set tools <tool1,tool2>`",
+    "• `config set tools <tool1,tool2>` (or `none` to turn off Slack's default tools here)",
     "• `config get tools`",
     "• `config clear tools`",
     "• `config list tools`",
@@ -290,6 +339,7 @@ export async function handleConfigCommand(
     "• `config available repos`",
     "• `config list channels` — unified per-channel view (agent + tools + repo + prompt)",
     "• Add `--channel <#chan>` to any command to configure a channel you're not in",
+    `• \`config set|get|clear tools --surface <id>\` — default tools for a surface (${listSurfaces().map((s) => `\`${s.id}\``).join(", ")}; admin)`,
   ].join("\n");
 }
 

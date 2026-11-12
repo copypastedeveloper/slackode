@@ -86,6 +86,8 @@ export const INTERNAL_AGENT_NAMES = new Set([
 ]);
 
 export const INTERNAL_AGENT_PREFIX = "build-";
+/** Q&A agent family without the scheduler tools, for surfaces that can't schedule (build-noscheduler[-<tools>]). */
+export const NO_SCHEDULER_AGENT = "build-noscheduler";
 
 // ── Network ──
 
