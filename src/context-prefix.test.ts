@@ -47,4 +47,20 @@ describe("buildPrefix (other surfaces)", () => {
     assert.match(out, /link to another Linear thread/);
     assert.doesNotMatch(out, /Slack/);
   });
+
+  it("renders Linear's notes, issue URL and requester email", async () => {
+    const { LINEAR_SURFACE } = await import("./surfaces/linear/agent.js");
+    const out = buildPrefix({
+      isNew: true,
+      mode: "qa",
+      ctx: {
+        surface: LINEAR_SURFACE,
+        requester: { id: "lin-u1", name: "Ada", email: "ada@example.com" },
+        place: { label: "Issue", id: "ENG-12", name: "Fix login", url: "https://linear.app/x/issue/ENG-12" },
+      },
+    });
+    assert.match(out, /User: Ada <ada@example\.com> \(user ID: lin-u1\)/);
+    assert.match(out, /Issue: Fix login \(issue ID: ENG-12\)\nIssue URL: https:\/\/linear\.app/);
+    assert.match(out, /Scheduling isn't available from Linear/);
+  });
 });

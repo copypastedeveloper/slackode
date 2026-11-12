@@ -113,6 +113,9 @@ function buildQAInstructions(opts: PrefixOpts): string[] {
     "For engineering roles, include file paths, code references, and technical detail.",
   );
 
+  const notes = opts.ctx.surface.notes;
+  if (notes?.length) lines.push("", ...notes);
+
   if (opts.repo) {
     lines.push(
       "", "REPOSITORY ACCESS:",
@@ -248,11 +251,13 @@ function appendContextBlock(lines: string[], ctx: ConversationContext): void {
   const { requester, place } = ctx;
   const label = place.label;
   const lower = label.toLowerCase();
-  lines.push(`User: ${requester.name} (user ID: ${requester.id})`);
+  const email = requester.email ? ` <${requester.email}>` : "";
+  lines.push(`User: ${requester.name}${email} (user ID: ${requester.id})`);
   if (ctx.threadId) lines.push(`Thread ID: ${ctx.threadId}`);
   if (requester.title) lines.push(`Role/Title: ${requester.title}`);
   if (requester.status) lines.push(`Status: ${requester.status}`);
   lines.push(`${label}: ${place.name} (${lower} ID: ${place.id}${place.kind ? `, ${place.kind}` : ""})`);
+  if (place.url) lines.push(`${label} URL: ${place.url}`);
   if (place.topic) lines.push(`${label} topic: ${place.topic}`);
   if (place.purpose) lines.push(`${label} purpose: ${place.purpose}`);
   if (ctx.customPrompt) lines.push(`Custom instructions for this ${lower}: ${ctx.customPrompt}`);
