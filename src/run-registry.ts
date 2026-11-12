@@ -19,6 +19,8 @@ export interface ActiveRun {
   stopRequested: boolean;
   /** How many times "keep waiting" was clicked (capped to avoid unbounded runs). */
   extensions: number;
+  /** Stop's server-side abort; the runner waits for it before the turn ends. */
+  serverAbort?: Promise<void>;
 }
 
 const runs = new Map<string, ActiveRun>();
@@ -33,4 +35,19 @@ export function getRun(key: string): ActiveRun | undefined {
 
 export function removeRun(key: string): void {
   runs.delete(key);
+}
+
+/** Stop a run client and server side. A second call is a no-op. */
+export function requestStop(run: ActiveRun, abortServerSide: (sessionId: string) => Promise<void>): void {
+  if (run.stopRequested) return;
+  run.stopRequested = true;
+  run.controller.abort();
+  run.serverAbort = abortServerSide(run.sessionId).catch(() => {});
+}
+
+/** Stop the run under `key`. Returns it, or undefined if it already finished. */
+export function stopRun(key: string, abortServerSide: (sessionId: string) => Promise<void>): ActiveRun | undefined {
+  const run = runs.get(key);
+  if (run) requestStop(run, abortServerSide);
+  return run;
 }
